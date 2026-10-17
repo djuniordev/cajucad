@@ -13,6 +13,25 @@ import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
 const full = process.argv.includes('--full');
+const release = process.argv.includes('--release');
+const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+
+if (release) {
+  if (!process.env.GH_TOKEN) {
+    console.error('Falta o GH_TOKEN (token do GitHub com permissão de escrita em Releases). Veja as instruções antes de publicar.');
+    process.exit(1);
+  }
+  const { owner, repo } = pkg.build.publish[0];
+  const res = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases?per_page=100`, { headers: { Authorization: `Bearer ${process.env.GH_TOKEN}`, 'User-Agent': 'cajucad-release' } });
+  if (!res.ok) {
+    console.error(`Não consegui consultar o GitHub (${res.status}). Confira o token.`);
+    process.exit(1);
+  }
+  if ((await res.json()).some((r) => r.tag_name === `v${pkg.version}`)) {
+    console.error(`Já existe uma Release v${pkg.version}. Aumente o "version" no package.json.`);
+    process.exit(1);
+  }
+}
 // Separate folders so a running copy of one build never blocks building the other.
 let output = path.join(process.env.LOCALAPPDATA ?? os.tmpdir(), full ? 'cajucad-build-completo' : 'cajucad-build');
 // A copy of the app running from win-unpacked locks that folder: build somewhere else then.
@@ -36,12 +55,15 @@ if (full) {
 }
 
 const config = {
+  ...(release ? { publish: [{ ...pkg.build.publish[0], releaseType: 'draft' }] } : {}),
   directories: { output, buildResources: 'build' },
   nsis: { artifactName: full ? 'CajuCAD-Setup-${version}-completo.${ext}' : 'CajuCAD-Setup-${version}.${ext}' },
   ...(full ? { extraResources: [{ from: 'build/slicer-engine', to: 'slicer' }] } : {}),
 };
 
-const files = await build({ targets: Platform.WINDOWS.createTarget('nsis'), config });
+const files = await build({ targets: Platform.WINDOWS.createTarget('nsis'), config, publish: release ? 'always' : 'never' });
 const exes = files.filter((f) => f.endsWith('.exe'));
 console.log('\nInstalador pronto:');
 for (const f of exes) console.log(`  ${f}  (${(fs.statSync(f).size / 1048576).toFixed(0)} MB)`);
+if (release) console.log(`
+Rascunho criado. Revise e clique em Publish em: https://github.com/${pkg.build.publish[0].owner}/${pkg.build.publish[0].repo}/releases`);
