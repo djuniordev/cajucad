@@ -55,7 +55,6 @@ if (full) {
 }
 
 const config = {
-  ...(release ? { publish: [{ ...pkg.build.publish[0], releaseType: 'draft' }] } : {}),
   directories: { output, buildResources: 'build' },
   nsis: { artifactName: full ? 'CajuCAD-Setup-${version}-completo.${ext}' : 'CajuCAD-Setup-${version}.${ext}' },
   ...(full ? { extraResources: [{ from: 'build/slicer-engine', to: 'slicer' }] } : {}),
