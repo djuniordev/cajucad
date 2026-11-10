@@ -165,11 +165,70 @@ export interface PatternFeature {
   plane: PlaneName;
 }
 
-export type SolidFeature = ExtrudeFeature | RevolveFeature;
-export type Feature = SketchFeature | SolidFeature | EdgeFeature | ShellFeature | HoleFeature | PatternFeature;
+/** A closed profile carried along a path (open or closed lines/arcs of another sketch). */
+export interface SweepFeature {
+  id: string;
+  type: 'sweep';
+  name: string;
+  sketch: string;
+  path: string;
+  op: BodyOp;
+}
 
-/** Sketch a feature is built from, if any. */
-export const featureSketch = (f: Feature): string | null => (f.type === 'extrude' || f.type === 'revolve' ? f.sketch : null);
+/** Solid blending through the outlines of two or more sketches, in order. */
+export interface LoftFeature {
+  id: string;
+  type: 'loft';
+  name: string;
+  sketches: string[];
+  /** Straight sides between sections instead of smooth ones. */
+  ruled: boolean;
+  op: BodyOp;
+}
+
+/** Screw thread (60° metric profile) cut into a cylindrical face, outside (screw) or inside (nut). */
+export interface ThreadFeature {
+  id: string;
+  type: 'thread';
+  name: string;
+  /** Point on the cylindrical face. */
+  face: V3 | null;
+  pitch: number;
+  /** Thread length from the face's start; 0 = the whole face. */
+  length: number;
+  lefthand: boolean;
+}
+
+/** Solid read from a STEP file (kept inside the part). */
+export interface ImportFeature {
+  id: string;
+  type: 'import';
+  name: string;
+  file: string;
+  step: string;
+  op: BodyOp;
+}
+
+export type SolidFeature = ExtrudeFeature | RevolveFeature;
+export type Feature =
+  | SketchFeature
+  | SolidFeature
+  | EdgeFeature
+  | ShellFeature
+  | HoleFeature
+  | PatternFeature
+  | SweepFeature
+  | LoftFeature
+  | ThreadFeature
+  | ImportFeature;
+
+/** Sketches a feature is built from. */
+export function featureSketches(f: Feature): string[] {
+  if (f.type === 'extrude' || f.type === 'revolve') return [f.sketch];
+  if (f.type === 'sweep') return [f.sketch, f.path];
+  if (f.type === 'loft') return f.sketches;
+  return [];
+}
 
 export interface PartDef {
   version: 1;
@@ -205,6 +264,7 @@ export function parsePart(json: unknown): PartDef | null {
 
 export const featureLabel: Record<Feature['type'], string> = {
   sketch: 'Esboço', extrude: 'Extrusão', revolve: 'Revolução', fillet: 'Filete', chamfer: 'Chanfro', shell: 'Casca', hole: 'Furo', pattern: 'Padrão',
+  sweep: 'Varredura', loft: 'Loft', thread: 'Rosca', import: 'Importado',
 };
 
 export function nextName(part: PartDef, type: Feature['type']) {
@@ -221,6 +281,35 @@ const same = (a: V2, b: V2) => Math.abs(a[0] - b[0]) < EPS && Math.abs(a[1] - b[
 export type Profile =
   | { kind: 'circle'; c: V2; r: number }
   | { kind: 'path'; start: V2; segs: ({ t: 'line'; to: V2 } | { t: 'arc'; m: V2; to: V2 })[] };
+
+/**
+ * The one path of a sketch for a sweep: its lines and arcs chained end to end from a free end
+ * (or around, when they close), or a lone circle. Null when there is no single path.
+ */
+export function sketchPath(entities: SketchEntity[]): { start: V2; segs: Extract<Profile, { kind: 'path' }>['segs']; closed: boolean } | { circle: { c: V2; r: number } } | null {
+  const segs = entities.filter((e): e is Extract<SketchEntity, { t: 'line' | 'arc' }> => !e.construction && (e.t === 'line' || e.t === 'arc') && !same(e.a, e.b));
+  if (!segs.length) {
+    const c = entities.find((e) => !e.construction && e.t === 'circle');
+    return c && c.t === 'circle' ? { circle: { c: c.c, r: c.r } } : null;
+  }
+  const degree = (p: V2) => segs.filter((s) => same(s.a, p) || same(s.b, p)).length;
+  const free = segs.flatMap((s) => [s.a, s.b]).find((p) => degree(p) === 1);
+  const start = free ?? segs[0].a;
+  const used = new Set<number>();
+  const out: Extract<Profile, { kind: 'path' }>['segs'] = [];
+  let end = start;
+  for (;;) {
+    const j = segs.findIndex((s, k) => !used.has(k) && (same(s.a, end) || same(s.b, end)));
+    if (j < 0) break;
+    used.add(j);
+    const s = segs[j];
+    const to = same(s.a, end) ? s.b : s.a;
+    out.push(s.t === 'arc' ? { t: 'arc', m: s.m, to } : { t: 'line', to });
+    end = to;
+  }
+  if (used.size !== segs.length) return null;
+  return { start, segs: out, closed: same(end, start) };
+}
 
 /** Closed outlines of a sketch: closed entities as they are, open lines/arcs chained end to end. */
 export function sketchProfiles(entities: SketchEntity[]): { profiles: Profile[]; openEnds: V2[] } {

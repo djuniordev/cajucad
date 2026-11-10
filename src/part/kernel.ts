@@ -2,16 +2,22 @@
  * OpenCascade kernel (via replicad): turns a PartDef into an exact solid and its mesh.
  * The WASM module is large (~22 MB), so it loads only when a part is first edited.
  */
-import type { Drawing, Edge, Face, Shape3D } from 'replicad';
+import type { Drawing, Edge, Face, Shape3D, Sketch, Wire } from 'replicad';
+import { cutThreads, type ThreadCut } from './threads';
 import {
   PLANES,
   pointInPolygon,
   polygonArea,
   profilePoints,
+  sketchPath,
   sketchProfiles,
   type Axis3,
   type BodyOp,
   type HoleFeature,
+  type ImportFeature,
+  type LoftFeature,
+  type SweepFeature,
+  type ThreadFeature,
   type PartDef,
   type PatternFeature,
   type Profile,
@@ -105,6 +111,111 @@ function featureSolid(rc: Replicad, f: SolidFeature, sketches: Map<string, Sketc
   if (!(f.angle > 0 && f.angle <= 360)) throw new Error('O ângulo precisa estar entre 0 e 360°.');
   const axis = f.axis === 'x' ? P.x : P.y;
   return region.sketchOnPlane(planeFor(rc, s)).revolve(axis, { origin: scale(P.n, s.offset), angle: f.angle }) as Shape3D;
+}
+
+/** Each closed outline of a sketch as a wire on its plane, largest first, marked when it is a hole. */
+function sketchWires(rc: Replicad, s: SketchFeature): { wire: Wire; hole: boolean }[] {
+  const { profiles } = sketchProfiles(s.entities);
+  if (!profiles.length) throw new Error(`“${s.name}” não tem nenhum contorno fechado.`);
+  const polys = profiles.map((p) => profilePoints(p, 12));
+  const order = profiles.map((_, i) => i).sort((a, b) => polygonArea(polys[b]) - polygonArea(polys[a]));
+  return order.map((i) => {
+    const depth = polys.filter((other, j) => j !== i && polys[i].filter((pt) => pointInPolygon(pt, other)).length > polys[i].length / 2).length;
+    return { wire: (profileDrawing(rc, profiles[i]).sketchOnPlane(planeFor(rc, s)) as Sketch).wire, hole: depth % 2 === 1 };
+  });
+}
+
+function sweepSolid(rc: Replicad, f: SweepFeature, sketches: Map<string, SketchFeature>): Shape3D {
+  const s = sketches.get(f.sketch), p = sketches.get(f.path);
+  if (!s || !p) throw new Error('Um dos esboços desta varredura foi apagado ou vem depois dela.');
+  if (s.id === p.id) throw new Error('O perfil e o caminho precisam ser esboços diferentes.');
+  const path = sketchPath(p.entities);
+  if (!path) throw new Error(`“${p.name}” precisa ter um caminho só (linhas e arcos ligados, ou um círculo).`);
+  let d: Drawing;
+  if ('circle' in path) d = rc.drawCircle(path.circle.r).translate(path.circle.c[0], path.circle.c[1]);
+  else {
+    const pen = rc.draw(path.start);
+    const segs = [...path.segs];
+    if (path.closed && segs.at(-1)?.t === 'line') segs.pop();
+    for (const g of segs) {
+      if (g.t === 'line') pen.lineTo(g.to);
+      else pen.threePointsArcTo(g.to, g.m);
+    }
+    d = path.closed ? pen.close() : pen.done();
+  }
+  const spine = (d.sketchOnPlane(planeFor(rc, p)) as Sketch).wire;
+  let out: Shape3D | null = null;
+  for (const { wire, hole } of sketchWires(rc, s)) {
+    const solid = rc.genericSweep(wire, spine, { transitionMode: 'right' });
+    out = !out ? solid : hole ? out.cut(solid) : out.fuse(solid);
+  }
+  return out!;
+}
+
+function loftSolid(rc: Replicad, f: LoftFeature, sketches: Map<string, SketchFeature>): Shape3D {
+  if (f.sketches.length < 2) throw new Error('Escolha pelo menos dois esboços.');
+  const wires = f.sketches.map((id) => {
+    const s = sketches.get(id);
+    if (!s) throw new Error('Um dos esboços deste loft foi apagado ou vem depois dele.');
+    const ws = sketchWires(rc, s);
+    if (ws.length !== 1) throw new Error(`“${s.name}” precisa ter um contorno fechado só.`);
+    return ws[0].wire;
+  });
+  return rc.loft(wires, { ruled: f.ruled });
+}
+
+/** Where a thread goes: axis, radius and length of the picked cylindrical face (cut later, on the mesh). */
+function threadOn(rc: Replicad, body: Shape3D, f: ThreadFeature): ThreadCut {
+  if (!f.face) throw new Error('Clique na face redonda (o lado do pino ou o de dentro do furo).');
+  if (!(f.pitch > 0)) throw new Error('O passo precisa ser maior que zero.');
+  const [face] = findNear(rc, body, body.faces, [f.face], 'faces');
+  const oc = rc.getOC();
+  const ad = new oc.BRepAdaptor_Surface(face.wrapped, true);
+  try {
+    if (ad.GetType() !== oc.GeomAbs_SurfaceType.GeomAbs_Cylinder) throw new Error('A rosca vai numa face redonda (cilíndrica).');
+    const cyl = ad.Cylinder();
+    const R = cyl.Radius();
+    const loc = cyl.Location(), dir = cyl.Axis().Direction();
+    const axis: V3 = [dir.X(), dir.Y(), dir.Z()];
+    // On a cylinder V runs along the axis, so the face's V range is its length.
+    const v0 = ad.FirstVParameter(), v1 = ad.LastVParameter();
+    const total = v1 - v0;
+    const len = f.length > 0 ? Math.min(f.length, total) : total;
+    if (!(len > f.pitch)) throw new Error('A face é mais curta que um passo da rosca.');
+    const c0: V3 = [loc.X() + axis[0] * v0, loc.Y() + axis[1] * v0, loc.Z() + axis[2] * v0];
+    // Outside of a pin or inside of a hole: compare the face normal with the way out from the axis.
+    const p = f.face;
+    const rel: V3 = [p[0] - c0[0], p[1] - c0[1], p[2] - c0[2]];
+    const along = rel[0] * axis[0] + rel[1] * axis[1] + rel[2] * axis[2];
+    const radial: V3 = [rel[0] - axis[0] * along, rel[1] - axis[1] * along, rel[2] - axis[2] * along];
+    const nrm = face.normalAt(p);
+    const outside = nrm.x * radial[0] + nrm.y * radial[1] + nrm.z * radial[2] > 0;
+    return { origin: c0, axis, radius: R, length: len, pitch: f.pitch, outside, lefthand: f.lefthand };
+  } finally {
+    ad.delete();
+  }
+}
+
+const imported = new Map<string, Shape3D>();
+
+async function importedSolid(rc: Replicad, f: ImportFeature): Promise<Shape3D> {
+  const key = `${f.id}:${f.step.length}`;
+  let s = imported.get(key);
+  if (!s) {
+    const any = await rc.importSTEP(new Blob([f.step]));
+    if (!('faces' in any) || !any.faces.length) throw new Error('O arquivo STEP não tem sólidos.');
+    s = any as Shape3D;
+    imported.set(key, s);
+  }
+  return s.clone();
+}
+
+/** STEP file of the finished part (exact geometry, for other CAD programs). */
+export async function exportStep(part: PartDef): Promise<Blob> {
+  const r = await buildPart(part);
+  if (r.error) throw new Error(r.error.message);
+  if (!r.shape) throw new Error('A peça ainda não tem sólido.');
+  return r.shape.blobSTEP();
 }
 
 
@@ -205,6 +316,8 @@ export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise
   const sketches = new Map<string, SketchFeature>();
   // Solids each feature added or removed, for patterns.
   const tools = new Map<string, { tool: Shape3D; op: BodyOp }>();
+  const threads: ThreadCut[] = [];
+  const threadIds: string[] = [];
   let shape: Shape3D | null = null;
   let error: BuildResult['error'];
   const need = (what: string) => {
@@ -228,6 +341,21 @@ export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise
           } else shape = combine(shape, tool.clone(), f.op);
           break;
         }
+        case 'sweep':
+        case 'loft':
+        case 'import': {
+          const tool = f.type === 'sweep' ? sweepSolid(rc, f, sketches) : f.type === 'loft' ? loftSolid(rc, f, sketches) : await importedSolid(rc, f);
+          tools.set(f.id, { tool, op: f.op });
+          if (!shape) {
+            if (f.op !== 'join') throw new Error('Não há sólido para recortar ainda: a primeira operação precisa ser “Juntar”.');
+            shape = tool.clone();
+          } else shape = combine(shape, tool.clone(), f.op);
+          break;
+        }
+        case 'thread':
+          threads.push(threadOn(rc, need('roscar'), f));
+          threadIds.push(f.id);
+          break;
         case 'hole': {
           const body = need('furar');
           const tool = holeTool(rc, f);
@@ -284,7 +412,16 @@ export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise
     if (f.id === opts.upTo) break;
   }
   const edges = shape && opts.edges ? edgeLines(shape) : undefined;
-  return { shape, mesh: shape ? meshOf(shape) : null, error, edges };
+  let mesh = shape ? meshOf(shape) : null;
+  // Threads go on last, on the mesh, so faces stay pickable in the views before them.
+  if (mesh && threads.length && !opts.before) {
+    try {
+      mesh = cutThreads(mesh, threads);
+    } catch (e) {
+      error ??= { feature: threadIds.at(-1)!, message: kernelMessage(e) };
+    }
+  }
+  return { shape, mesh, error, edges };
 }
 
 /** OpenCascade failures come out as bare numbers or English; say something useful. */
@@ -303,3 +440,5 @@ function meshOf(shape: Shape3D): PartMesh {
   const m = shape.mesh({ tolerance: 0.02, angularTolerance: 0.2 });
   return { positions: Array.from(m.vertices), indices: Array.from(m.triangles), faces: m.faceGroups.map((g) => ({ start: g.start, count: g.count })) };
 }
+
+export { provideManifold } from './threads';

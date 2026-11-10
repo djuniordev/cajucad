@@ -55,6 +55,14 @@
 .part-open .topbar, .part-open .library, .part-open .inspector, .part-open .viewbar, .part-open .snapbar { visibility: hidden; }
 .part-new { width: 100%; height: 40px; justify-content: flex-start; gap: 10px; padding: 0 12px; }
 .pe-field .field input { color: var(--text); }
+.pe-section {
+  position: absolute; z-index: 2; right: 12px; bottom: 12px; display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+  border-radius: 12px; font-size: 12.5px; color: var(--text);
+}
+.pe-section select { height: 28px; border-radius: 8px; border: 0; background: var(--field); color: var(--text); padding: 0 6px; }
+.pe-section input[type=range] { width: 180px; accent-color: var(--accent); }
+.pe-section .v { min-width: 64px; font-variant-numeric: tabular-nums; color: var(--text-2); }
+.pe-top .btn.active { background: var(--accent-soft); color: var(--accent); }
 .pe-ctools { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
 .pe-ctools .btn { height: 32px; padding: 0; min-width: 0; justify-content: center; font-size: 14px; font-weight: 600; }
 .pe-dof { font-size: 12px; color: #c77d00; display: flex; align-items: center; gap: 6px; }

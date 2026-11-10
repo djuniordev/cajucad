@@ -10,15 +10,18 @@ const out = path.join(root, 'node_modules', '.cache', 'part-kernel.mjs');
 await build({
   input: path.join(root, 'src/part/kernel.ts'),
   platform: 'node',
-  external: [/^replicad/],
+  external: [/^replicad/, /^manifold-3d/],
   output: { file: out, format: 'esm' },
   logLevel: 'silent',
 });
-const { buildPart, provideKernel } = await import(`file:///${out.replace(/\\/g, '/')}`);
+const { buildPart, provideKernel, provideManifold } = await import(`file:///${out.replace(/\\/g, '/')}`);
 const { default: opencascade } = await import('replicad-opencascadejs');
 const rc = await import('replicad');
 rc.setOC(await opencascade({ wasmBinary: readFileSync(require.resolve('replicad-opencascadejs/wasm')) }));
 provideKernel(rc);
+const mf = await (await import('manifold-3d')).default();
+mf.setup();
+provideManifold(mf);
 
 const sk = (id, plane, entities, offset = 0) => ({ id, type: 'sketch', name: id, plane, offset, entities });
 const box = () => [
@@ -27,7 +30,28 @@ const box = () => [
 ];
 const hole = (id, at, extra = {}) => ({ id, type: 'hole', name: id, at, n: [0, 0, 1], diameter: 4, depth: 6, through: false, kind: 'simple', headDiameter: 8, headDepth: 2, ...extra });
 const pattern = (id, extra) => ({ id, type: 'pattern', name: id, kind: 'linear', sources: [], axis: 'x', count: 3, spacing: 10, angle: 360, axis2: null, count2: 1, spacing2: 10, plane: 'YZ', ...extra });
+const pin = () => [
+  sk('p', 'XY', [{ id: 'c', t: 'circle', c: [0, 0], r: 4 }]),
+  { id: 'ep', type: 'extrude', name: 'ep', sketch: 'p', distance: 16, symmetric: false, reverse: false, op: 'join' },
+];
+const nutBlock = () => [
+  sk('n', 'XY', [{ id: 'r', t: 'rect', c: [0, 0], w: 20, h: 20 }, { id: 'c', t: 'circle', c: [0, 0], r: 4 }]),
+  { id: 'en', type: 'extrude', name: 'en', sketch: 'n', distance: 10, symmetric: false, reverse: false, op: 'join' },
+];
 const cases = {
+  'varredura: círculo ao longo de L': [
+    sk('path', 'XZ', [{ id: 'l1', t: 'line', a: [0, 0], b: [0, 30] }, { id: 'l2', t: 'line', a: [0, 30], b: [20, 30] }]),
+    sk('prof', 'XY', [{ id: 'c', t: 'circle', c: [0, 0], r: 3 }]),
+    { id: 'sw', type: 'sweep', name: 'sw', sketch: 'prof', path: 'path', op: 'join' },
+  ],
+  'loft: quadrado embaixo, círculo em cima': [
+    sk('a', 'XY', [{ id: 'r', t: 'rect', c: [0, 0], w: 20, h: 20 }]),
+    sk('b', 'XY', [{ id: 'c', t: 'circle', c: [0, 0], r: 5 }], 25),
+    { id: 'lf', type: 'loft', name: 'lf', sketches: ['a', 'b'], ruled: false, op: 'join' },
+  ],
+  'rosca externa M8 passo 1,25': [...pin(), { id: 't', type: 'thread', name: 't', face: [4, 0, 8], pitch: 1.25, length: 0, lefthand: false }],
+  'rosca interna no furo de 8': [...nutBlock(), { id: 't', type: 'thread', name: 't', face: [4, 0, 5], pitch: 1.25, length: 0, lefthand: false }],
+  'erro esperado: rosca em face plana': [...nutBlock(), { id: 't', type: 'thread', name: 't', face: [5, 5, 10], pitch: 1, length: 0, lefthand: false }],
   'filete nas 4 arestas de cima (r 3)': [...box(), { id: 'f', type: 'fillet', name: 'f', edges: [[0, 10, 10], [0, -10, 10], [20, 0, 10], [-20, 0, 10]], all: false, size: 3 }],
   'chanfro em todas (1)': [...box(), { id: 'c', type: 'chamfer', name: 'c', edges: [], all: true, size: 1 }],
   'casca aberta em cima (2)': [...box(), { id: 's', type: 'shell', name: 's', faces: [[5, 5, 10]], thickness: 2 }],
@@ -72,7 +96,16 @@ for (const [name, features] of Object.entries(cases)) {
     const v = p.filter((_, i) => i % 3 === a);
     return v.length ? `${Math.min(...v).toFixed(1)}..${Math.max(...v).toFixed(1)}` : '-';
   });
-  const vol = r.shape ? Math.round(rc.measureShapeVolumeProperties(r.shape).volume) : '';
+  let vol = '';
+  if (r.mesh) {
+    const P = r.mesh.positions, I = r.mesh.indices;
+    let v = 0;
+    for (let i = 0; i < I.length; i += 3) {
+      const [a, b, c] = [I[i], I[i + 1], I[i + 2]].map((k) => [P[k * 3], P[k * 3 + 1], P[k * 3 + 2]]);
+      v += a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0]) + a[2] * (b[0] * c[1] - b[1] * c[0]);
+    }
+    vol = Math.round(v / 6);
+  }
   console.log(`${r.error && !name.startsWith('erro') ? 'FALHOU' : 'ok    '} ${name}: tris ${(r.mesh?.indices.length ?? 0) / 3}, x ${bb[0]} y ${bb[1]} z ${bb[2]} vol ${vol}${r.error ? ` | erro: ${r.error.message}` : ''}`);
   if (name.startsWith('erro') ? !r.error : r.error || !r.mesh) failed++;
 }
