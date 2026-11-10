@@ -18,6 +18,27 @@ export type SketchEntity =
 
 export type PlaneName = 'XY' | 'XZ' | 'YZ';
 
+/** A point of an entity: line/arc ends `a`/`b`, centre `c`; or the sketch origin. */
+export type PointRef = { e: string; p: 'a' | 'b' | 'c' } | 'origin';
+
+export type SketchConstraint =
+  | { id: string; t: 'coincident'; p1: PointRef; p2: PointRef }
+  | { id: string; t: 'horizontal' | 'vertical'; e: string }
+  | { id: string; t: 'parallel' | 'perpendicular' | 'equal' | 'tangent' | 'concentric'; e1: string; e2: string }
+  /** Point on the middle of a line. */
+  | { id: string; t: 'midpoint'; p: PointRef; e: string }
+  /** Point lying on a line, circle or arc. */
+  | { id: string; t: 'onEntity'; p: PointRef; e: string }
+  | { id: string; t: 'fix'; p: PointRef; at: V2 }
+  // Dimensions (values in mm or degrees).
+  | { id: string; t: 'length'; e: string; v: number }
+  | { id: string; t: 'diameter'; e: string; v: number }
+  | { id: string; t: 'distance'; p1: PointRef; p2: PointRef; v: number }
+  /** Angle from e1 to e2 (signed, degrees); `flip` measures against e2 reversed (the angle seen inside a corner). */
+  | { id: string; t: 'angle'; e1: string; e2: string; v: number; flip?: boolean };
+
+export const isDimension = (c: SketchConstraint): c is Extract<SketchConstraint, { v: number }> => 'v' in c;
+
 export interface SketchFeature {
   id: string;
   type: 'sketch';
@@ -26,6 +47,32 @@ export interface SketchFeature {
   /** Distance of the sketch plane along its normal, mm. */
   offset: number;
   entities: SketchEntity[];
+  constraints?: SketchConstraint[];
+}
+
+/** Coordinates of a referenced point, or null when its entity is gone. */
+export function refPoint(entities: SketchEntity[], r: PointRef): V2 | null {
+  if (r === 'origin') return [0, 0];
+  const e = entities.find((x) => x.id === r.e);
+  if (!e) return null;
+  if (r.p === 'c') {
+    if (e.t === 'arc') return circleThrough(e.a, e.m, e.b)?.c ?? null;
+    return 'c' in e ? e.c : null;
+  }
+  return e.t === 'line' || e.t === 'arc' ? e[r.p] : null;
+}
+
+export const sameRef = (a: PointRef, b: PointRef) => (a === 'origin' || b === 'origin' ? a === b : a.e === b.e && a.p === b.p);
+
+/** Constraints that mention an entity. */
+export function constraintEntities(c: SketchConstraint): string[] {
+  const ids: string[] = [];
+  const ref = (r: PointRef) => r !== 'origin' && ids.push(r.e);
+  if ('e' in c) ids.push(c.e);
+  if ('e1' in c) ids.push(c.e1, c.e2);
+  if ('p' in c) ref(c.p);
+  if ('p1' in c) ref(c.p1), ref(c.p2);
+  return ids;
 }
 
 /** How a feature's solid combines with the part built so far. */

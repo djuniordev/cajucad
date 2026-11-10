@@ -55,3 +55,17 @@
 .part-open .topbar, .part-open .library, .part-open .inspector, .part-open .viewbar, .part-open .snapbar { visibility: hidden; }
 .part-new { width: 100%; height: 40px; justify-content: flex-start; gap: 10px; padding: 0 12px; }
 .pe-field .field input { color: var(--text); }
+.pe-ctools { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 4px; }
+.pe-ctools .btn { height: 32px; padding: 0; min-width: 0; justify-content: center; font-size: 14px; font-weight: 600; }
+.pe-dof { font-size: 12px; color: #c77d00; display: flex; align-items: center; gap: 6px; }
+.pe-dof.ok { color: #2fa866; }
+.pe-marks { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.pe-mark {
+  position: absolute; left: 0; top: 0; pointer-events: auto; cursor: pointer; user-select: none; white-space: nowrap;
+  font-size: 11px; font-weight: 600; line-height: 16px; min-width: 16px; text-align: center; padding: 0 3px; border-radius: 5px;
+  background: var(--panel-solid); color: var(--text-2); border: 1px solid var(--divider); font-variant-numeric: tabular-nums;
+}
+.pe-mark.pt { font-size: 7px; min-width: 12px; line-height: 12px; padding: 0; }
+.pe-mark.dim { color: var(--text); font-size: 12px; padding: 1px 6px; }
+.pe-mark:hover { border-color: var(--accent); }
+.pe-mark.on { background: var(--accent); color: #fff; border-color: var(--accent); }
