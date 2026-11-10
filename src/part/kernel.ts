@@ -11,6 +11,9 @@ import {
   sketchPath,
   sketchProfiles,
   splineBeziers,
+  splinePoints,
+  curveEnds,
+  circleThrough,
   axisLine,
   axisOf,
   emptyRefs,
@@ -31,6 +34,10 @@ import {
   type ImportFeature,
   type LoftFeature,
   type SweepFeature,
+  type RibFeature,
+  type PipeFeature,
+  type CoilFeature,
+  type EmbossFeature,
   type ThreadFeature,
   type PartDef,
   type PatternFeature,
@@ -95,7 +102,9 @@ function planeFor(rc: Replicad, s: SketchFeature, shift = 0) {
 /** Draw a chain of segments; a closed one ends with close() (which draws a last straight edge itself). */
 function drawSegs(rc: Replicad, start: V2, segs: Seg[], closed: boolean): Drawing {
   const pen = rc.draw(start);
-  const list = [...segs];
+  // Zero-length pieces (repeated points, e.g. in font outlines) break the kernel's curves.
+  const near = (a: V2, b: V2) => Math.abs(a[0] - b[0]) < 1e-6 && Math.abs(a[1] - b[1]) < 1e-6;
+  const list = segs.filter((s, i) => s.t !== 'line' || !near(s.to, i ? segs[i - 1].to : start));
   if (closed && list.at(-1)?.t === 'line') list.pop();
   let cur = start;
   for (const s of list) {
@@ -406,8 +415,17 @@ export interface BuildOptions {
   edges?: boolean;
 }
 
+/** A separate solid of the part, named by the feature that created it. */
+export interface Body {
+  id: string;
+  shape: Shape3D;
+}
+
 /** Rebuild the whole history. Stops at the first failing feature and keeps what was built before it. */
-export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise<BuildResult & { shape: Shape3D | null; edges?: number[][]; refs: Refs }> {
+export async function buildPart(
+  part: PartDef,
+  opts: BuildOptions = {},
+): Promise<BuildResult & { shape: Shape3D | null; edges?: number[][]; refs: Refs; bodies: string[] }> {
   const rc = await loadKernel();
   refs = emptyRefs();
   const sketches = new Map<string, SketchFeature>();
@@ -415,11 +433,23 @@ export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise
   const tools = new Map<string, { tool: Shape3D; op: BodyOp }>();
   const threads: ThreadCut[] = [];
   const threadIds: string[] = [];
-  let shape: Shape3D | null = null;
+  const bodies: Body[] = [];
+  // The body the next operation works on (the last one made, or the one clicked).
+  let cur = -1;
   let error: BuildResult['error'];
-  const need = (what: string) => {
-    if (!shape) throw new Error(`Não há sólido para ${what} ainda.`);
-    return shape;
+  const need = (what: string, at?: V3 | null) => {
+    if (!bodies.length) throw new Error(`Não há sólido para ${what} ainda.`);
+    if (at && bodies.length > 1) cur = nearestBody(rc, bodies, at);
+    return bodies[cur].shape;
+  };
+  const set = (s: Shape3D) => (bodies[cur].shape = s);
+  const add = (id: string, tool: Shape3D, op: BodyOp) => {
+    tools.set(id, { tool, op: op === 'new' ? 'join' : op });
+    if (op === 'new' || !bodies.length) {
+      if (op !== 'join' && op !== 'new') throw new Error('Não há sólido para recortar ainda: a primeira operação precisa ser “Juntar”.');
+      bodies.push({ id, shape: tool.clone() });
+      cur = bodies.length - 1;
+    } else set(combine(bodies[cur].shape, tool.clone(), op));
   };
   for (const f of part.features) {
     if (f.id === opts.before) break;
@@ -430,89 +460,169 @@ export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise
           break;
         case 'plane':
         case 'axis':
-        case 'point':
-          construct(rc, f, shape);
-          break;
-        case 'extrude':
-        case 'revolve': {
-          const tool = featureSolid(rc, f, sketches);
-          tools.set(f.id, { tool, op: f.op });
-          if (!shape) {
-            if (f.op !== 'join') throw new Error('Não há sólido para recortar ainda: a primeira operação precisa ser “Juntar”.');
-            shape = tool.clone();
-          } else shape = combine(shape, tool.clone(), f.op);
+        case 'point': {
+          const at = f.type === 'plane' ? f.face : f.type === 'axis' ? f.pick : null;
+          construct(rc, f, bodies.length ? need('escolher', at) : null);
           break;
         }
+        case 'extrude':
+        case 'revolve':
+          add(f.id, featureSolid(rc, f, sketches), f.op);
+          break;
         case 'sweep':
         case 'loft':
-        case 'import': {
-          const tool = f.type === 'sweep' ? sweepSolid(rc, f, sketches) : f.type === 'loft' ? loftSolid(rc, f, sketches) : await importedSolid(rc, f);
-          tools.set(f.id, { tool, op: f.op });
-          if (!shape) {
-            if (f.op !== 'join') throw new Error('Não há sólido para recortar ainda: a primeira operação precisa ser “Juntar”.');
-            shape = tool.clone();
-          } else shape = combine(shape, tool.clone(), f.op);
+        case 'import':
+          add(f.id, f.type === 'sweep' ? sweepSolid(rc, f, sketches) : f.type === 'loft' ? loftSolid(rc, f, sketches) : await importedSolid(rc, f), f.op);
           break;
-        }
+        case 'rib':
+          add(f.id, ribSolid(rc, f, sketches), f.op);
+          break;
+        case 'pipe':
+          add(f.id, pipeSolid(rc, f, sketches), f.op);
+          break;
+        case 'coil':
+          add(f.id, coilSolid(rc, f), f.op);
+          break;
         case 'thread':
-          threads.push(threadOn(rc, need('roscar'), f));
+          threads.push(threadOn(rc, need('roscar', f.face), f));
           threadIds.push(f.id);
           break;
         case 'hole': {
-          const body = need('furar');
+          const body = need('furar', f.at);
           const tool = holeTool(rc, f);
           tools.set(f.id, { tool, op: 'cut' });
-          shape = body.cut(tool.clone());
+          set(body.cut(tool.clone()));
           break;
         }
         case 'fillet':
         case 'chamfer': {
-          const body = need(f.type === 'fillet' ? 'arredondar' : 'chanfrar');
+          const body = need(f.type === 'fillet' ? 'arredondar' : 'chanfrar', f.all ? null : f.edges[0]);
           if (!(f.size > 0)) throw new Error('A medida precisa ser maior que zero.');
-          if (f.all) shape = f.type === 'fillet' ? body.fillet(f.size) : body.chamfer(f.size);
+          if (f.all) set(f.type === 'fillet' ? body.fillet(f.size) : body.chamfer(f.size));
           else {
             if (!f.edges.length) throw new Error('Clique nas arestas da peça.');
             const edges = findNear(rc, body, body.edges, f.edges, 'arestas');
-            shape = f.type === 'fillet' ? body.fillet(f.size, (e) => e.inList(edges)) : body.chamfer(f.size, (e) => e.inList(edges));
+            set(f.type === 'fillet' ? body.fillet(f.size, (e) => e.inList(edges)) : body.chamfer(f.size, (e) => e.inList(edges)));
           }
           break;
         }
         case 'shell': {
-          const body = need('esvaziar');
+          const body = need('esvaziar', f.faces[0]);
           if (!(f.thickness > 0)) throw new Error('A espessura precisa ser maior que zero.');
           if (!f.faces.length) throw new Error('Clique na face que fica aberta.');
           const faces = findNear(rc, body, body.faces, f.faces, 'faces');
           // Positive thickness hollows inwards, keeping the outside size.
-          const vol = (s: Shape3D) => rc.measureShapeVolumeProperties(s).volume;
-          const before = vol(body);
-          shape = body.shell(f.thickness, (x) => x.inList(faces));
+          const before = volume(rc, body);
+          const out = body.shell(f.thickness, (x) => x.inList(faces));
           // OpenCascade sometimes gives the solid back untouched (e.g. a fillet next to the open face).
-          if (Math.abs(vol(shape) - before) < before * 1e-6)
+          if (Math.abs(volume(rc, out) - before) < before * 1e-6)
             throw new Error('O motor não conseguiu esvaziar assim. Tente uma parede mais fina ou faça a casca antes dos filetes.');
+          set(out);
           break;
         }
         case 'pattern': {
           const body = need('repetir');
           const copies = patternCopies(f);
           if (!f.sources.length) {
-            for (const place of copies) shape = shape!.fuse(place(body));
+            let out = body;
+            for (const place of copies) out = out.fuse(place(body));
+            set(out);
             break;
           }
           for (const id of f.sources) {
             const src = tools.get(id);
             if (!src) throw new Error('Só dá para repetir extrusões, revoluções e furos que vêm antes do padrão.');
-            for (const place of copies) shape = combine(shape!, place(src.tool), src.op);
+            for (const place of copies) set(combine(bodies[cur].shape, place(src.tool), src.op));
           }
           break;
         }
+        case 'draft': {
+          const body = need('inclinar', f.faces[0]);
+          if (!f.faces.length) throw new Error('Clique nas faces que vão inclinar.');
+          if (!(Math.abs(f.angle) > 0 && Math.abs(f.angle) < 45)) throw new Error('O ângulo precisa ficar entre 0 e 45°.');
+          const fr = frameOf(f.plane, refs);
+          if (!fr) throw new Error('O plano neutro foi apagado ou vem depois desta operação.');
+          const faces = findNear(rc, body, body.faces, f.faces, 'faces');
+          set(body.draft(f.angle, (x) => x.inList(faces), new rc.Plane(fr.o, fr.x, fr.n)));
+          break;
+        }
+        case 'emboss': {
+          const body = need('gravar', f.face);
+          const { tool, n } = embossTool(rc, f, body);
+          // Raised text grows out of the face; engraved text is cut from just above it.
+          const solid = tool.extrude(f.depth + (f.engrave ? 0.05 : 0), { extrusionDirection: f.engrave ? v3.mul(n, -1) : n }) as Shape3D;
+          set(f.engrave ? body.cut(solid) : body.fuse(solid));
+          break;
+        }
+        case 'pushpull': {
+          const body = need('empurrar', f.face);
+          if (!f.face) throw new Error('Clique numa face plana da peça.');
+          if (!f.distance) throw new Error('A distância não pode ser zero.');
+          const [face] = findNear(rc, body, body.faces, [f.face], 'faces');
+          if (face.geomType !== 'PLANE') throw new Error('Esta face não é plana. Escolha uma face reta.');
+          const nv = face.normalAt(f.face);
+          const n: V3 = [nv.x, nv.y, nv.z];
+          const slab = rc.basicFaceExtrusion(face, new rc.Vector(v3.mul(n, f.distance)));
+          set(f.distance > 0 ? body.fuse(slab) : body.cut(slab));
+          break;
+        }
+        case 'split': {
+          const body = need('dividir');
+          const fr = frameOf(f.plane, refs);
+          if (!fr) throw new Error('O plano da divisão foi apagado ou vem depois dela.');
+          const r = body.split(new rc.Plane(fr.o, fr.x, fr.n));
+          if (!r.positive || !r.negative) throw new Error('O plano não atravessa o corpo.');
+          set((f.keep === 'below' ? r.negative : r.positive) as Shape3D);
+          if (f.keep === 'both') {
+            bodies.push({ id: f.id, shape: r.negative as Shape3D });
+            cur = bodies.length - 1;
+          }
+          break;
+        }
+        case 'scale': {
+          const body = need('escalar');
+          if (!(f.factor > 0)) throw new Error('A escala precisa ser maior que zero.');
+          const at = f.point ? refs.points[f.point] : ([0, 0, 0] as V3);
+          if (!at) throw new Error('O ponto de referência foi apagado ou vem depois da escala.');
+          set(body.scale(f.factor, at));
+          break;
+        }
+        case 'move': {
+          const body = need('mover');
+          let out = body.clone();
+          if (f.angle) {
+            const ax = axisOf(f.axis, refs);
+            if (!ax) throw new Error('O eixo de giro foi apagado ou vem depois desta operação.');
+            out = out.rotate(f.angle, ax.o, ax.d);
+          }
+          out = out.translate(f.offset);
+          if (f.copy) {
+            bodies.push({ id: f.id, shape: out });
+            cur = bodies.length - 1;
+          } else set(out);
+          break;
+        }
+        case 'combine': {
+          const t = bodies.findIndex((b) => b.id === f.target);
+          if (t < 0) throw new Error('O corpo de destino não existe mais (ou vem depois desta operação).');
+          const used = f.tools.filter((id) => id !== f.target).map((id) => bodies.findIndex((b) => b.id === id));
+          if (!used.length) throw new Error('Escolha pelo menos um corpo para combinar.');
+          if (used.some((i) => i < 0)) throw new Error('Um dos corpos não existe mais (ou vem depois desta operação).');
+          const target = bodies[t];
+          for (const i of used) target.shape = combine(target.shape, bodies[i].shape.clone(), f.op);
+          if (!f.keepTools) for (const i of [...used].sort((a, b) => b - a)) bodies.splice(i, 1);
+          cur = bodies.indexOf(target);
+          break;
+        }
       }
-      if (shape && !shape.faces.length) throw new Error('A operação apagou o sólido inteiro.');
+      if (cur >= 0 && !bodies[cur].shape.faces.length) throw new Error('A operação apagou o sólido inteiro.');
     } catch (e) {
       error = { feature: f.id, message: kernelMessage(e) };
       break;
     }
     if (f.id === opts.upTo) break;
   }
+  const shape = !bodies.length ? null : bodies.length === 1 ? bodies[0].shape : (rc.makeCompound(bodies.map((b) => b.shape)) as Shape3D);
   const edges = shape && opts.edges ? edgeLines(shape) : undefined;
   let mesh = shape ? meshOf(shape) : null;
   // Threads go on last, on the mesh, so faces stay pickable in the views before them.
@@ -523,7 +633,121 @@ export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise
       error ??= { feature: threadIds.at(-1)!, message: kernelMessage(e) };
     }
   }
-  return { shape, mesh, error, edges, refs };
+  return { shape, mesh, error, edges, refs, bodies: bodies.map((b) => b.id) };
+}
+
+const volume = (rc: Replicad, s: Shape3D) => rc.measureShapeVolumeProperties(s).volume;
+
+/** Index of the body closest to a picked point. */
+function nearestBody(rc: Replicad, bodies: Body[], p: V3) {
+  const v = rc.makeVertex(p);
+  let best = 0, bd = Infinity;
+  bodies.forEach((b, i) => {
+    const d = rc.measureDistanceBetween(b.shape, v);
+    if (d < bd) (bd = d), (best = i);
+  });
+  return best;
+}
+
+/** Thin wall: every open line, arc and curve of the sketch thickened in its plane, then extruded. */
+function ribSolid(rc: Replicad, f: RibFeature, sketches: Map<string, SketchFeature>): Shape3D {
+  const s = sketches.get(f.sketch);
+  if (!s) throw new Error('O esboço desta nervura foi apagado ou vem depois dela.');
+  if (!(f.thickness > 0)) throw new Error('A espessura precisa ser maior que zero.');
+  if (!(f.distance > 0)) throw new Error('A altura precisa ser maior que zero.');
+  const h = f.thickness / 2;
+  let region: Drawing | null = null;
+  const put = (d: Drawing) => (region = region ? region.fuse(d) : d);
+  const joints: V2[] = [];
+  const bar = (a: V2, b: V2) => {
+    const L = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    if (L < 1e-6) return;
+    const nx = (-(b[1] - a[1]) / L) * h, ny = ((b[0] - a[0]) / L) * h;
+    put(rc.draw([a[0] + nx, a[1] + ny]).lineTo([b[0] + nx, b[1] + ny]).lineTo([b[0] - nx, b[1] - ny]).lineTo([a[0] - nx, a[1] - ny]).close());
+  };
+  for (const e of s.entities) {
+    if (e.construction) continue;
+    if (e.t === 'line') bar(e.a, e.b);
+    else if (e.t === 'arc') {
+      const c = circleThrough(e.a, e.m, e.b);
+      if (!c) bar(e.a, e.b);
+      else {
+        if (!(c.r > h)) throw new Error('A espessura é maior que o raio de um arco.');
+        const at = (p: V2, k: number): V2 => [c.c[0] + ((p[0] - c.c[0]) * k) / c.r, c.c[1] + ((p[1] - c.c[1]) * k) / c.r];
+        const o = c.r + h, i = c.r - h;
+        put(rc.draw(at(e.a, o)).threePointsArcTo(at(e.b, o), at(e.m, o)).lineTo(at(e.b, i)).threePointsArcTo(at(e.a, i), at(e.m, i)).close());
+      }
+    } else if (e.t === 'spline') {
+      const pts = splinePoints(e.pts, 8);
+      for (let i = 0; i < pts.length - 1; i++) bar(pts[i], pts[i + 1]);
+      joints.push(...pts.slice(1, -1));
+    } else continue;
+    const ends = curveEnds(e);
+    if (ends) joints.push(...ends);
+  }
+  if (!region) throw new Error(`“${s.name}” não tem linhas abertas para a nervura.`);
+  // Round joints so the walls meet without gaps.
+  for (const p of joints) put(rc.drawCircle(h).translate(p[0], p[1]));
+  const P = frameFor(s);
+  const r = region as Drawing;
+  if (f.symmetric) return r.sketchOnPlane(planeFor(rc, s, -f.distance / 2)).extrude(f.distance) as Shape3D;
+  return r.sketchOnPlane(planeFor(rc, s)).extrude(f.distance, { extrusionDirection: f.reverse ? scale(P.n, -1) : P.n }) as Shape3D;
+}
+
+/** The single path of a sketch as a wire in space. */
+function pathWire(rc: Replicad, p: SketchFeature): Wire {
+  const path = sketchPath(p.entities);
+  if (!path) throw new Error(`“${p.name}” precisa ter um caminho só (linhas e arcos ligados, ou um círculo).`);
+  const d = 'circle' in path ? rc.drawCircle(path.circle.r).translate(path.circle.c[0], path.circle.c[1]) : drawSegs(rc, path.start, path.segs, path.closed);
+  return (d.sketchOnPlane(planeFor(rc, p)) as Sketch).wire;
+}
+
+/** Round section swept along a wire, hollow when `inner` > 0. */
+function tubeAlong(rc: Replicad, spine: Wire, outer: number, inner: number, frenet: boolean): Shape3D {
+  const p = spine.startPoint, t = spine.tangentAt(0);
+  const ring = (r: number) => rc.assembleWire([rc.makeCircle(r, p, t)]);
+  const solid = rc.genericSweep(ring(outer), spine, { frenet, transitionMode: 'round' });
+  return inner > 0 ? solid.cut(rc.genericSweep(ring(inner), spine, { frenet, transitionMode: 'round' })) : solid;
+}
+
+function pipeSolid(rc: Replicad, f: PipeFeature, sketches: Map<string, SketchFeature>): Shape3D {
+  const p = sketches.get(f.path);
+  if (!p) throw new Error('O esboço do caminho foi apagado ou vem depois do cano.');
+  const R = f.diameter / 2;
+  if (!(R > 0)) throw new Error('O diâmetro precisa ser maior que zero.');
+  if (!(f.wall >= 0 && f.wall < R)) throw new Error('A parede precisa ficar entre zero e o raio do cano.');
+  return tubeAlong(rc, pathWire(rc, p), R, f.wall > 0 ? R - f.wall : 0, false);
+}
+
+function coilSolid(rc: Replicad, f: CoilFeature): Shape3D {
+  const ax = axisOf(f.axis, refs);
+  if (!ax) throw new Error('O eixo da mola foi apagado ou vem depois dela.');
+  const R = f.diameter / 2, r = f.wire / 2;
+  if (!(R > 0 && r > 0)) throw new Error('Os diâmetros precisam ser maiores que zero.');
+  if (!(r < R)) throw new Error('O arame é mais grosso que a mola.');
+  if (!(f.wire < f.pitch)) throw new Error('O passo precisa ser maior que a espessura do arame (as voltas se encostam).');
+  if (!(f.turns > 0 && f.turns <= 200)) throw new Error('As voltas precisam ficar entre 0 e 200.');
+  const helix = rc.makeHelix(f.pitch, f.pitch * f.turns, R, ax.o, ax.d);
+  return tubeAlong(rc, helix, r, 0, true);
+}
+
+/** Text outline laid on the picked face, as a sketch on that face. */
+function embossTool(rc: Replicad, f: EmbossFeature, body: Shape3D) {
+  if (!f.face) throw new Error('Clique numa face plana da peça.');
+  if (!(f.depth > 0)) throw new Error('A profundidade precisa ser maior que zero.');
+  if (!f.outline.length) throw new Error('Escreva um texto.');
+  const [face] = findNear(rc, body, body.faces, [f.face], 'faces');
+  if (face.geomType !== 'PLANE') throw new Error('Esta face não é plana. Escolha uma face reta.');
+  const nv = face.normalAt(f.face);
+  const n: V3 = [nv.x, nv.y, nv.z];
+  refs.frames[f.id] = frameFromNormal(f.face, n);
+  const sk = {
+    id: f.id, type: 'sketch', name: f.name, plane: f.id, offset: 0,
+    entities: [{ id: 't', t: 'text', c: [0, 0], text: f.text, size: f.size, font: f.font, rot: f.rot, outline: f.outline }],
+    constraints: [],
+  } as unknown as SketchFeature;
+  const plane = planeFor(rc, sk, f.engrave ? 0.05 : 0);
+  return { tool: sketchDrawing(rc, sk).sketchOnPlane(plane) as Sketch, n };
 }
 
 /** OpenCascade failures come out as bare numbers or English; say something useful. */

@@ -148,8 +148,8 @@ export function constraintEntities(c: SketchConstraint): string[] {
   return ids;
 }
 
-/** How a feature's solid combines with the part built so far. */
-export type BodyOp = 'join' | 'cut' | 'intersect';
+/** How a feature's solid combines with the part built so far (`new`: a separate body). */
+export type BodyOp = 'join' | 'cut' | 'intersect' | 'new';
 
 export interface ExtrudeFeature {
   id: string;
@@ -292,6 +292,121 @@ export interface PointFeature {
 
 export type ConstructionFeature = PlaneFeature | AxisFeature | PointFeature;
 
+/** Faces tilted by `angle` degrees from where they cross the neutral plane (mould release). */
+export interface DraftFeature {
+  id: string;
+  type: 'draft';
+  name: string;
+  faces: V3[];
+  angle: number;
+  plane: string;
+}
+
+/** Thin wall along the open lines of a sketch. */
+export interface RibFeature {
+  id: string;
+  type: 'rib';
+  name: string;
+  sketch: string;
+  thickness: number;
+  distance: number;
+  symmetric: boolean;
+  reverse: boolean;
+  op: BodyOp;
+}
+
+/** Round tube along the path of a sketch (`wall` 0 = solid rod). */
+export interface PipeFeature {
+  id: string;
+  type: 'pipe';
+  name: string;
+  path: string;
+  diameter: number;
+  wall: number;
+  op: BodyOp;
+}
+
+/** Spring: round wire wound around an axis. */
+export interface CoilFeature {
+  id: string;
+  type: 'coil';
+  name: string;
+  axis: string;
+  diameter: number;
+  pitch: number;
+  turns: number;
+  wire: number;
+  op: BodyOp;
+}
+
+/** Text raised from (or cut into) a flat face. */
+export interface EmbossFeature {
+  id: string;
+  type: 'emboss';
+  name: string;
+  face: V3 | null;
+  text: string;
+  font: string;
+  size: number;
+  rot: number;
+  /** Text outline centred on the origin (laid out by the editor). */
+  outline: V2[][];
+  depth: number;
+  engrave: boolean;
+}
+
+/** Cut the current body in two with a plane. */
+export interface SplitFeature {
+  id: string;
+  type: 'split';
+  name: string;
+  plane: string;
+  keep: 'both' | 'above' | 'below';
+}
+
+/** Move a flat face along its normal (adds or removes material). */
+export interface PushPullFeature {
+  id: string;
+  type: 'pushpull';
+  name: string;
+  face: V3 | null;
+  distance: number;
+}
+
+/** Uniform scale of the current body about a point (origin when empty). */
+export interface ScaleFeature {
+  id: string;
+  type: 'scale';
+  name: string;
+  factor: number;
+  point: string;
+}
+
+/** Move (or copy, as a new body) the current body. */
+export interface MoveFeature {
+  id: string;
+  type: 'move';
+  name: string;
+  offset: V3;
+  angle: number;
+  axis: string;
+  copy: boolean;
+}
+
+/** Join, cut or intersect bodies. */
+export interface CombineFeature {
+  id: string;
+  type: 'combine';
+  name: string;
+  /** Bodies are named by the feature that created them. */
+  target: string;
+  tools: string[];
+  op: 'join' | 'cut' | 'intersect';
+  keepTools: boolean;
+}
+
+export type SolidModFeature = DraftFeature | RibFeature | PipeFeature | CoilFeature | EmbossFeature | SplitFeature | PushPullFeature | ScaleFeature | MoveFeature | CombineFeature;
+
 /** A closed profile carried along a path (open or closed lines/arcs of another sketch). */
 export interface SweepFeature {
   id: string;
@@ -348,13 +463,16 @@ export type Feature =
   | LoftFeature
   | ThreadFeature
   | ImportFeature
-  | ConstructionFeature;
+  | ConstructionFeature
+  | SolidModFeature;
 
 /** Sketches a feature is built from. */
 export function featureSketches(f: Feature): string[] {
   if (f.type === 'extrude' || f.type === 'revolve') return [f.sketch];
   if (f.type === 'sweep') return [f.sketch, f.path];
   if (f.type === 'loft') return f.sketches;
+  if (f.type === 'rib') return [f.sketch];
+  if (f.type === 'pipe') return [f.path];
   return [];
 }
 
@@ -366,6 +484,10 @@ export function featureRefs(f: Feature): string[] {
   if (f.type === 'pattern') out.push(...f.sources, f.axis, f.plane);
   if (f.type === 'plane') out.push(f.ref, ...f.points);
   if (f.type === 'axis') out.push(...f.points);
+  if (f.type === 'draft' || f.type === 'split') out.push(f.plane);
+  if (f.type === 'coil' || f.type === 'move') out.push(f.axis);
+  if (f.type === 'scale') out.push(f.point);
+  if (f.type === 'combine') out.push(f.target, ...f.tools);
   return out;
 }
 
@@ -503,6 +625,8 @@ export function parsePart(json: unknown): PartDef | null {
 export const featureLabel: Record<Feature['type'], string> = {
   sketch: 'Esboço', extrude: 'Extrusão', revolve: 'Revolução', fillet: 'Filete', chamfer: 'Chanfro', shell: 'Casca', hole: 'Furo', pattern: 'Padrão',
   sweep: 'Varredura', loft: 'Loft', thread: 'Rosca', import: 'Importado', plane: 'Plano', axis: 'Eixo', point: 'Ponto',
+  draft: 'Ângulo de saída', rib: 'Nervura', pipe: 'Cano', coil: 'Mola', emboss: 'Gravação', split: 'Divisão', pushpull: 'Empurrar/puxar', scale: 'Escala',
+  move: 'Mover', combine: 'Combinar',
 };
 
 export function nextName(part: PartDef, type: Feature['type']) {

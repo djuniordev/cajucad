@@ -85,6 +85,14 @@ const P: Record<string, string> = {
   sweep: '<path d="M4 20c0-8 4-12 16-12"/><circle cx="5" cy="18" r="2.5"/><path d="M17 5l3 3-3 3"/>',
   loft: '<rect x="5" y="16" width="14" height="5" rx="1"/><circle cx="12" cy="5" r="2.5"/><path d="M5 16l4.5-10M19 16l-4.5-10"/>',
   thread: '<path d="M9 3v18M15 3v18"/><path d="M9 6l6-2M9 10l6-2M9 14l6-2M9 18l6-2"/>',
+  draft: '<path d="M8 4h8l3 16H5z"/><path d="M8 4v16" stroke-dasharray="2 2" opacity=".6"/>',
+  rib: '<path d="M3 20h18M4 20V10M20 20V10"/><path d="M4 12l16 0" opacity=".5"/><path d="M11 20v-8h2v8"/>',
+  pipe: '<path d="M4 20V11a5 5 0 015-5h11"/><path d="M8 20v-9a1 1 0 011-1h11"/>',
+  coil: '<path d="M7 4h10M7 20h10"/><path d="M7 4l10 3-10 3 10 3-10 3 10 4"/>',
+  emboss: '<rect x="3" y="12" width="18" height="8" rx="1.5"/><path d="M8 12V5h8M12 5v7"/>',
+  split: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M2 14l20-4" stroke-dasharray="3 2"/>',
+  pushpull: '<rect x="4" y="13" width="16" height="8" rx="1.5"/><path d="M12 3v8M9 6l3-3 3 3"/>',
+  combine: '<circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/>',
 };
 
 export function icon(name: keyof typeof P | string, size = 18) {

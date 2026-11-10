@@ -156,6 +156,51 @@ const cases = {
     { id: 'pl', type: 'plane', name: 'pl', kind: 'offset', ref: 'YZ', offset: 25, angle: 0, hinge: 'x', points: [], face: null, flip: false },
     pattern('m', { kind: 'mirror', plane: 'pl' }),
   ],
+  'ângulo de saída 5° nas laterais compridas': [
+    ...box(),
+    { id: 'd', type: 'draft', name: 'd', faces: [[0, 10, 5], [0, -10, 5]], angle: 5, plane: 'XY' },
+  ],
+  'nervura em T (esp. 2, altura 8)': [
+    ...box(),
+    sk('w', 'XY', [{ id: 'l1', t: 'line', a: [-15, 0], b: [15, 0] }, { id: 'l2', t: 'line', a: [0, 0], b: [0, 8] }], 10),
+    { id: 'rb', type: 'rib', name: 'rb', sketch: 'w', thickness: 2, distance: 8, symmetric: false, reverse: false, op: 'join' },
+  ],
+  'cano oco ao longo de L com arco': [
+    sk('path', 'XZ', [{ id: 'l1', t: 'line', a: [0, 0], b: [0, 20] }, { id: 'a1', t: 'arc', a: [0, 20], m: [2.93, 27.07], b: [10, 30] }, { id: 'l2', t: 'line', a: [10, 30], b: [30, 30] }]),
+    { id: 'pp', type: 'pipe', name: 'pp', path: 'path', diameter: 8, wall: 1.5, op: 'join' },
+  ],
+  'mola: 5 voltas, passo 6, arame 2': [{ id: 'c', type: 'coil', name: 'c', axis: 'z', diameter: 20, pitch: 6, turns: 5, wire: 2, op: 'join' }],
+  'relevo e gravação na face de cima': [
+    ...box(),
+    { id: 'g1', type: 'emboss', name: 'g1', face: [-10, 0, 10], text: 'O', font: '', size: 8, rot: 0, outline: [[[-3, -3], [3, -3], [3, 3], [-3, 3]], [[-1, -1], [1, -1], [1, 1], [-1, 1]]], depth: 1, engrave: false },
+    { id: 'g2', type: 'emboss', name: 'g2', face: [10, 0, 10], text: 'O', font: '', size: 8, rot: 45, outline: [[[-3, -3], [3, -3], [3, 3], [-3, 3]]], depth: 2, engrave: true },
+  ],
+  'empurrar a face de cima +5 e puxar a lateral -4': [
+    ...box(),
+    { id: 'u', type: 'pushpull', name: 'u', face: [0, 0, 10], distance: 5 },
+    { id: 'v', type: 'pushpull', name: 'v', face: [20, 0, 5], distance: -4 },
+  ],
+  'dividir em dois corpos no YZ e afastar um': [
+    ...box(),
+    { id: 's', type: 'split', name: 's', plane: 'YZ', keep: 'both' },
+    { id: 'm', type: 'move', name: 'm', offset: [-5, 0, 0], angle: 0, axis: 'z', copy: false },
+  ],
+  'dividir e ficar só com a metade de cima': [...box(), { id: 'pl', type: 'plane', name: 'pl', kind: 'offset', ref: 'XY', offset: 4, angle: 0, hinge: 'x', points: [], face: null, flip: false }, { id: 's', type: 'split', name: 's', plane: 'pl', keep: 'above' }],
+  'escala 2x': [...box(), { id: 'k', type: 'scale', name: 'k', factor: 2, point: '' }],
+  'corpo novo, copiar girado e combinar (cortar)': [
+    ...box(),
+    sk('c', 'XY', [{ id: 'c', t: 'circle', c: [0, 0], r: 5 }]),
+    { id: 'cy', type: 'extrude', name: 'cy', sketch: 'c', distance: 30, symmetric: true, reverse: false, op: 'new' },
+    { id: 'cp', type: 'move', name: 'cp', offset: [12, 0, 0], angle: 0, axis: 'z', copy: true },
+    { id: 'cb', type: 'combine', name: 'cb', target: 'eb', tools: ['cy', 'cp'], op: 'cut', keepTools: false },
+  ],
+  'dois corpos: furo vai no corpo clicado': [
+    ...box(),
+    sk('c2', 'XY', [{ id: 'r', t: 'rect', c: [0, 40], w: 20, h: 20 }]),
+    { id: 'e2', type: 'extrude', name: 'e2', sketch: 'c2', distance: 10, symmetric: false, reverse: false, op: 'new' },
+    hole('h', [0, 0, 10], { through: true }),
+  ],
+  'erro esperado: mola com voltas encostando': [{ id: 'c', type: 'coil', name: 'c', axis: 'z', diameter: 20, pitch: 2, turns: 5, wire: 3, op: 'join' }],
   'erro esperado: esboço aberto': [
     sk('s1', 'XY', [{ id: 'l1', t: 'line', a: [0, 0], b: [10, 0] }]),
     { id: 'e1', type: 'extrude', name: 'e1', sketch: 's1', distance: 5, symmetric: false, reverse: false, op: 'join' },
@@ -179,7 +224,7 @@ for (const [name, features] of Object.entries(cases)) {
     }
     vol = Math.round(v / 6);
   }
-  console.log(`${r.error && !name.startsWith('erro') ? 'FALHOU' : 'ok    '} ${name}: tris ${(r.mesh?.indices.length ?? 0) / 3}, x ${bb[0]} y ${bb[1]} z ${bb[2]} vol ${vol}${r.error ? ` | erro: ${r.error.message}` : ''}`);
+  console.log(`${r.error && !name.startsWith('erro') ? 'FALHOU' : 'ok    '} ${name}: tris ${(r.mesh?.indices.length ?? 0) / 3}, x ${bb[0]} y ${bb[1]} z ${bb[2]} vol ${vol}${r.bodies.length > 1 ? ` corpos ${r.bodies.length}` : ''}${r.error ? ` | erro: ${r.error.message}` : ''}`);
   if (name.startsWith('erro') ? !r.error : r.error || !r.mesh) failed++;
 }
 process.exit(failed ? 1 : 0);

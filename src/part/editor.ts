@@ -51,6 +51,10 @@ import {
   type PatternFeature,
   type ShellFeature,
   type ThreadFeature,
+  type DraftFeature,
+  type EmbossFeature,
+  type PushPullFeature,
+  type SolidModFeature,
   type PartDef,
   type PlaneName,
   type PointRef,
@@ -126,7 +130,11 @@ const OPS: [BodyOp, string][] = [
   ['join', 'Juntar'],
   ['cut', 'Recortar'],
   ['intersect', 'Interseção'],
+  ['new', 'Corpo novo'],
 ];
+
+/** Features that make a solid from nothing (the first one starts the first body). */
+const MAKES_SOLID = ['extrude', 'revolve', 'sweep', 'loft', 'import', 'rib', 'pipe', 'coil'];
 
 const css = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#888';
 const r2 = (v: number) => Math.round(v * 100) / 100;
@@ -399,7 +407,11 @@ class PartEditor {
                   ? pf.kind === 'edge' ? 'Clique numa aresta reta.' : 'Clique na face redonda de um furo ou pino.'
                   : pf.type === 'point'
                     ? 'Clique na peça para pôr o ponto ali, ou digite as coordenadas.'
-                    : 'Clique nas arestas para pôr ou tirar. Esc mostra o resultado.';
+                    : pf.type === 'draft'
+                      ? 'Clique nas faces que vão inclinar. Esc mostra o resultado.'
+                      : pf.type === 'emboss' || pf.type === 'pushpull'
+                        ? 'Clique numa face plana da peça. Esc mostra o resultado.'
+                        : 'Clique nas arestas para pôr ou tirar. Esc mostra o resultado.';
       this.status.textContent = r.error ? `⚠ ${this.feature(r.error.feature)?.name ?? 'Erro'}: ${r.error.message}` : hint || (r.mesh ? 'Peça atualizada.' : 'Crie um esboço e depois extrude ou revolva.');
     }
     this.status.classList.toggle('warn', !!r.error);
@@ -506,14 +518,14 @@ class PartEditor {
       const at = pf.edges.findIndex((p) => this.edgeNear(p) === hit.edge);
       if (at >= 0) pf.edges.splice(at, 1);
       else pf.edges.push(this.edgeMid(hit.edge));
-    } else if (pf.type === 'shell' && hit.point) {
+    } else if ((pf.type === 'shell' || pf.type === 'draft') && hit.point) {
       const at = pf.faces.findIndex((p) => this.faceNear(p) === hit.face);
       if (at >= 0) pf.faces.splice(at, 1);
       else pf.faces.push(hit.point);
     } else if (pf.type === 'hole' && hit.point && hit.normal) {
       pf.at = hit.point;
       pf.n = hit.normal;
-    } else if (pf.type === 'thread' && hit.point) pf.face = hit.point;
+    } else if ((pf.type === 'thread' || pf.type === 'emboss' || pf.type === 'pushpull') && hit.point) pf.face = hit.point;
     else if (pf.type === 'plane' && hit.point) pf.face = hit.point;
     else if (pf.type === 'axis' && pf.kind === 'edge' && hit.edge != null) pf.pick = this.edgeMid(hit.edge);
     else if (pf.type === 'axis' && hit.point) pf.pick = hit.point;
@@ -586,12 +598,12 @@ class PartEditor {
       const chosen = pf.pick ? this.edgeNear(pf.pick) : -1;
       if (chosen >= 0) thick(this.pickEdges[chosen], accent, 4);
       if (hov?.edge != null && hov.edge !== chosen) thick(this.pickEdges[hov.edge], accent, 3, 0.55);
-    } else if (pf.type === 'thread' || pf.type === 'plane' || pf.type === 'axis') {
-      const at = pf.type === 'thread' || pf.type === 'plane' ? pf.face : pf.pick;
+    } else if (pf.type === 'thread' || pf.type === 'plane' || pf.type === 'axis' || pf.type === 'emboss' || pf.type === 'pushpull') {
+      const at = pf.type === 'axis' ? pf.pick : pf.face;
       const chosen = at ? this.faceNear(at) : -1;
       if (chosen >= 0) faceOverlay(chosen, 0.55);
       if (hov?.face != null && hov.face !== chosen) faceOverlay(hov.face, 0.25);
-    } else if (pf.type === 'shell') {
+    } else if (pf.type === 'shell' || pf.type === 'draft') {
       const chosen = new Set(pf.faces.map((p) => this.faceNear(p)));
       for (const i of chosen) faceOverlay(i, 0.55);
       if (hov?.face != null && !chosen.has(hov.face)) faceOverlay(hov.face, 0.25);
@@ -834,7 +846,7 @@ class PartEditor {
       })
       .join('');
     const hasSketch = this.sketches().length > 0;
-    const hasSolid = fs.some((f) => ['extrude', 'revolve', 'sweep', 'loft', 'import'].includes(f.type));
+    const hasSolid = fs.some((f) => MAKES_SOLID.includes(f.type));
     const twoSketches = this.sketches().length > 1;
     const btn = (act: string, ic: string, label: string, on: boolean) => `<button class="btn soft" data-act="${act}" ${on ? '' : 'disabled'}>${icon(ic, 16)}<span>${label}</span></button>`;
     return `
@@ -854,6 +866,7 @@ class PartEditor {
         ${btn('thread', 'thread', 'Rosca', hasSolid)}
         ${btn('import-step', 'import', 'STEP', true)}
         ${btn('construct', 'plane', 'Referência', true)}
+        ${btn('more-solid', 'combine', 'Mais', true)}
       </div>
       ${sel ? `<div class="pe-params"><div class="panel-title">${esc(sel.name)}</div>${this.featureForm(sel)}</div>` : ''}`;
   }
@@ -913,6 +926,102 @@ class PartEditor {
     return `<label class="pe-field"><span>Tipo</span>${kinds}</label>${body}
       <label class="pe-check"><input type="checkbox" data-k="flip" ${f.flip ? 'checked' : ''}/> Inverter o lado</label>
       <button class="btn soft wide" data-act="sketch-on" data-id="${f.id}">${icon('sketch', 15)} Novo esboço neste plano</button>`;
+  }
+
+  /** Bodies that exist just before position `idx` of the history, named by the feature that made them. */
+  private bodyOpts(idx: number): [string, string][] {
+    const out: [string, string][] = [];
+    for (const f of this.part.features.slice(0, idx)) {
+      const op = (f as { op?: BodyOp }).op;
+      if ((MAKES_SOLID.includes(f.type) && (!out.length || op === 'new')) || (f.type === 'split' && f.keep === 'both') || (f.type === 'move' && f.copy))
+        out.push([f.id, `Corpo ${out.length + 1} (${f.name})`]);
+      if (f.type === 'combine' && !f.keepTools)
+        for (const t of f.tools) {
+          const i = out.findIndex(([id]) => id === t && t !== f.target);
+          if (i >= 0) out.splice(i, 1);
+        }
+    }
+    return out;
+  }
+
+  private solidModForm(
+    f: Feature,
+    idx: number,
+    sel: (k: string, cur: string, opts: [string, string][]) => string,
+    sketchOpts: (k: string, cur: string) => string,
+    axes: [string, string][],
+  ): string | null {
+    const op = (cur: BodyOp) => `<label class="pe-field"><span>Operação</span>${this.opSelect(cur)}</label>`;
+    const facePick = (at: V3 | null, what: string) => `<div class="hint">${at ? 'Clique noutra face para mudar.' : what}</div>`;
+    switch (f.type) {
+      case 'draft': {
+        const n = f.faces.length;
+        return `
+          <div class="hint">${n ? `${n} ${n === 1 ? 'face escolhida' : 'faces escolhidas'}.` : 'Nenhuma face ainda.'} Clique nas faces laterais que vão inclinar.</div>
+          ${n ? `<button class="btn soft wide" data-act="clear-picks">Limpar escolha</button>` : ''}
+          ${this.numField('Ângulo', 'angle', f.angle, '°')}
+          <label class="pe-field"><span>Plano neutro (não muda)</span>${sel('plane', f.plane, this.planeOpts(idx))}</label>
+          <div class="hint">Ângulo negativo inclina para o outro lado.</div>`;
+      }
+      case 'rib':
+        return `
+          <label class="pe-field"><span>Esboço (linhas abertas)</span>${sketchOpts('sketch', f.sketch)}</label>
+          <div class="pe-row">${this.numField('Espessura', 'thickness', f.thickness)}${this.numField('Altura', 'distance', f.distance)}</div>
+          <label class="pe-check"><input type="checkbox" data-k="symmetric" ${f.symmetric ? 'checked' : ''}/> Para os dois lados</label>
+          <label class="pe-check"><input type="checkbox" data-k="reverse" ${f.reverse ? 'checked' : ''} ${f.symmetric ? 'disabled' : ''}/> Inverter direção</label>
+          ${op(f.op)}`;
+      case 'pipe':
+        return `
+          <label class="pe-field"><span>Caminho (linhas e arcos)</span>${sketchOpts('path', f.path)}</label>
+          <div class="pe-row">${this.numField('Diâmetro', 'diameter', f.diameter)}${this.numField('Parede', 'wall', f.wall)}</div>
+          <div class="hint">Parede 0 = barra maciça.</div>
+          ${op(f.op)}`;
+      case 'coil':
+        return `
+          <label class="pe-field"><span>Eixo</span>${sel('axis', f.axis, axes)}</label>
+          <div class="pe-row">${this.numField('Diâmetro', 'diameter', f.diameter)}${this.numField('Arame', 'wire', f.wire)}</div>
+          <div class="pe-row">${this.numField('Passo', 'pitch', f.pitch)}${this.numField('Voltas', 'turns', f.turns, '')}</div>
+          ${op(f.op)}`;
+      case 'emboss': {
+        const fonts = listFaces();
+        return `
+          ${facePick(f.face, 'Clique na face plana onde vai o texto.')}
+          <label class="pe-field"><span>Texto</span><span class="field"><input data-k="text" value="${esc(f.text)}" spellcheck="false"/></span></label>
+          <label class="pe-field"><span>Fonte</span><select data-k="font">${fonts.map((x) => `<option value="${esc(x.id)}" ${x.id === f.font ? 'selected' : ''}>${esc(x.family)} ${esc(x.style)}</option>`).join('')}</select></label>
+          <div class="pe-row">${this.numField('Tamanho', 'size', f.size)}${this.numField('Giro', 'rot', f.rot, '°')}</div>
+          ${this.numField('Profundidade', 'depth', f.depth)}
+          <label class="pe-field"><span>Tipo</span>${sel('engrave', f.engrave ? '1' : '', [['', 'Relevo (sai da face)'], ['1', 'Gravado (entra na face)']])}</label>`;
+      }
+      case 'pushpull':
+        return `
+          ${facePick(f.face, 'Clique na face plana que vai andar.')}
+          ${this.numField('Distância', 'distance', f.distance)}
+          <div class="hint">Positivo puxa para fora (aumenta a peça); negativo empurra para dentro.</div>`;
+      case 'split':
+        return `
+          <label class="pe-field"><span>Plano de corte</span>${sel('plane', f.plane, this.planeOpts(idx))}</label>
+          <label class="pe-field"><span>Ficar com</span>${sel('keep', f.keep, [['both', 'Os dois pedaços (2 corpos)'], ['above', 'O lado da frente do plano'], ['below', 'O lado de trás do plano']])}</label>`;
+      case 'scale':
+        return `
+          ${this.numField('Escala', 'factor', f.factor, '×')}
+          <label class="pe-field"><span>Em volta do ponto</span>${sel('point', f.point, [['', 'Origem'], ...this.pointOpts(idx).slice(1)])}</label>`;
+      case 'move':
+        return `
+          <div class="pe-row">${this.numField('X', 'off.0', f.offset[0])}${this.numField('Y', 'off.1', f.offset[1])}${this.numField('Z', 'off.2', f.offset[2])}</div>
+          <div class="pe-row">${this.numField('Girar', 'angle', f.angle, '°')}<label class="pe-field"><span>Em volta de</span>${sel('axis', f.axis, axes)}</label></div>
+          <label class="pe-check"><input type="checkbox" data-k="copy" ${f.copy ? 'checked' : ''}/> Copiar (vira um corpo novo)</label>
+          <div class="hint">Move o último corpo feito.</div>`;
+      case 'combine': {
+        const bodies = this.bodyOpts(idx);
+        return `
+          <label class="pe-field"><span>Corpo de destino</span>${sel('target', f.target, bodies)}</label>
+          <div class="pe-field"><span>Corpos ferramenta</span>
+          ${bodies.filter(([id]) => id !== f.target).map(([id, l]) => `<label class="pe-check"><input type="checkbox" data-k="tool:${id}" ${f.tools.includes(id) ? 'checked' : ''}/> ${esc(l)}</label>`).join('') || '<div class="hint">Só há um corpo. Use “Corpo novo” numa extrusão para ter outro.</div>'}</div>
+          <label class="pe-field"><span>Operação</span>${sel('op', f.op, OPS.filter(([v]) => v !== 'new'))}</label>
+          <label class="pe-check"><input type="checkbox" data-k="keepTools" ${f.keepTools ? 'checked' : ''}/> Manter os corpos ferramenta</label>`;
+      }
+    }
+    return null;
   }
 
   private featureForm(f: Feature) {
@@ -991,8 +1100,10 @@ class PartEditor {
     }
     if (f.type === 'import')
       return `<div class="hint">${icon('file', 14)} ${esc(f.file)}</div><label class="pe-field"><span>Operação</span>${this.opSelect(f.op)}</label>`;
+    const solidForm = this.solidModForm(f, idx, sel, sketchOpts, axes);
+    if (solidForm !== null) return solidForm;
     if (f.type !== 'pattern') return '';
-    const usable = this.part.features.slice(0, idx).filter((x) => ['extrude', 'revolve', 'hole', 'sweep', 'loft', 'import'].includes(x.type));
+    const usable = this.part.features.slice(0, idx).filter((x) => [...MAKES_SOLID, 'hole'].includes(x.type));
     const srcs = `<div class="pe-field"><span>O que repetir</span>
       <label class="pe-check"><input type="checkbox" data-k="src:" ${f.sources.length ? '' : 'checked'}/> A peça inteira</label>
       ${usable.map((x) => `<label class="pe-check"><input type="checkbox" data-k="src:${x.id}" ${f.sources.includes(x.id) ? 'checked' : ''}/> ${esc(x.name)}</label>`).join('')}</div>`;
@@ -1126,12 +1237,35 @@ class PartEditor {
             ],
             act,
           );
+        case 'more-solid': {
+          const hasSolid = this.part.features.some((f) => MAKES_SOLID.includes(f.type));
+          const hasSketch = this.sketches().length > 0;
+          const item = (type: SolidModFeature['type'], label: string, on: boolean) => ({ label, icon: type, disabled: !on, action: () => this.addSolidMod(type) });
+          return showMenu(
+            [
+              { heading: 'Criar' },
+              item('rib', 'Nervura (parede fina)', hasSketch),
+              item('pipe', 'Cano', hasSketch),
+              item('coil', 'Mola', true),
+              { heading: 'Mudar a peça' },
+              item('draft', 'Ângulo de saída', hasSolid),
+              item('emboss', 'Texto em relevo ou gravado', hasSolid),
+              item('pushpull', 'Empurrar / puxar face', hasSolid),
+              item('scale', 'Escala', hasSolid),
+              { heading: 'Corpos' },
+              item('split', 'Dividir corpo', hasSolid),
+              item('move', 'Mover / copiar corpo', hasSolid),
+              item('combine', 'Combinar corpos', hasSolid),
+            ],
+            act,
+          );
+        }
         case 'sketch-on':
           return this.newSketch(id);
         case 'clear-picks': {
           const f = this.feature(this.selected);
           if (f?.type === 'fillet' || f?.type === 'chamfer') f.edges = [];
-          if (f?.type === 'shell') f.faces = [];
+          if (f?.type === 'shell' || f?.type === 'draft') f.faces = [];
           return this.changed();
         }
         case 'edit-sketch':
@@ -1170,10 +1304,13 @@ class PartEditor {
   }
 
   /** The selected feature, when it is one that is set up by clicking the part. */
-  private get pickFeature(): EdgeFeature | ShellFeature | HoleFeature | ThreadFeature | PlaneFeature | AxisFeature | PointFeature | null {
+  private get pickFeature():
+    | EdgeFeature | ShellFeature | HoleFeature | ThreadFeature | PlaneFeature | AxisFeature | PointFeature | DraftFeature | EmbossFeature | PushPullFeature
+    | null {
     const f = this.sketchId ? null : this.feature(this.selected);
     if (!f) return null;
     if (f.type === 'fillet' || f.type === 'chamfer' || f.type === 'shell' || f.type === 'hole' || f.type === 'thread' || f.type === 'point') return f;
+    if (f.type === 'draft' || f.type === 'emboss' || f.type === 'pushpull') return f;
     if (f.type === 'plane' && f.kind === 'face') return f;
     if (f.type === 'axis' && (f.kind === 'edge' || f.kind === 'cylinder')) return f;
     return null;
@@ -1224,6 +1361,26 @@ class PartEditor {
       const id = k.slice(5);
       const on = new Set(val ? [...f.sketches, id] : f.sketches.filter((x) => x !== id));
       f.sketches = this.sketches().map((s) => s.id).filter((x) => on.has(x));
+    } else if (k.startsWith('tool:') && f.type === 'combine') {
+      const id = k.slice(5);
+      f.tools = val ? [...f.tools, id] : f.tools.filter((x) => x !== id);
+    } else if (k === 'target' && f.type === 'combine') {
+      f.target = String(val);
+      f.tools = f.tools.filter((x) => x !== f.target);
+    } else if (k.startsWith('off.') && f.type === 'move') {
+      const n = num(String(val));
+      if (!Number.isFinite(n)) return this.renderSide();
+      f.offset[Number(k.slice(4))] = n;
+    } else if (k === 'engrave' && f.type === 'emboss') f.engrave = !!val;
+    else if (f.type === 'emboss' && (k === 'text' || k === 'font' || k === 'size')) {
+      const patch = { text: f.text, font: f.font, size: f.size, [k]: k === 'size' ? num(String(val)) : String(val) };
+      if (!(patch.size > 0)) return this.renderSide();
+      return void textOutline(patch.text, patch.font, patch.size)
+        .then((o) => {
+          Object.assign(f, patch, { outline: o });
+          this.changed();
+        })
+        .catch(() => toast('Não consegui ler essa fonte.', 'error'));
     } else if (k === 'preset' && f.type === 'thread') {
       if (!val) return;
       f.pitch = Number(val);
@@ -1239,7 +1396,7 @@ class PartEditor {
       if (!Number.isFinite(n)) return this.renderSide();
       f.at[Number(k.slice(3))] = n;
     } else if (typeof val === 'boolean') rec[k] = val;
-    else if (['offset', 'distance', 'angle', 'size', 'thickness', 'diameter', 'depth', 'headDiameter', 'headDepth', 'count', 'spacing', 'count2', 'spacing2', 'pitch', 'length'].includes(k)) {
+    else if (['offset', 'distance', 'angle', 'size', 'thickness', 'diameter', 'depth', 'headDiameter', 'headDepth', 'count', 'spacing', 'count2', 'spacing2', 'pitch', 'length', 'factor', 'turns', 'wire', 'wall', 'rot'].includes(k)) {
       const n = num(val);
       if (!Number.isFinite(n)) return this.renderSide();
       rec[k] = n;
@@ -1609,6 +1766,55 @@ class PartEditor {
     this.select(f.id);
   }
 
+  private addSolidMod(type: SolidModFeature['type']) {
+    const base = { id: fid(), name: nextName(this.part, type) };
+    const sk = this.sketches();
+    const sel = this.feature(this.selected);
+    const sketch = (sel?.type === 'sketch' ? sel : sk.at(-1))?.id ?? '';
+    const op: BodyOp = 'join';
+    const last = this.bodyOpts(this.part.features.length);
+    let f: SolidModFeature;
+    switch (type) {
+      case 'draft':
+        f = { ...base, type, faces: [], angle: 3, plane: 'XY' };
+        break;
+      case 'rib':
+        f = { ...base, type, sketch, thickness: 2, distance: 10, symmetric: false, reverse: false, op };
+        break;
+      case 'pipe':
+        f = { ...base, type, path: sketch, diameter: 6, wall: 1, op };
+        break;
+      case 'coil':
+        f = { ...base, type, axis: 'z', diameter: 20, pitch: 5, turns: 5, wire: 2, op };
+        break;
+      case 'emboss':
+        f = { ...base, type, face: null, text: 'Texto', font: DEFAULT_FONT_ID, size: 8, rot: 0, outline: [], depth: 1, engrave: false };
+        void textOutline(f.text, f.font, f.size).then((o) => {
+          (f as EmbossFeature).outline = o;
+          this.changed();
+        });
+        break;
+      case 'pushpull':
+        f = { ...base, type, face: null, distance: 5 };
+        break;
+      case 'split':
+        f = { ...base, type, plane: 'YZ', keep: 'both' };
+        break;
+      case 'scale':
+        f = { ...base, type, factor: 2, point: '' };
+        break;
+      case 'move':
+        f = { ...base, type, offset: [10, 0, 0], angle: 0, axis: 'z', copy: false };
+        break;
+      case 'combine':
+        f = { ...base, type, target: last[0]?.[0] ?? '', tools: last.slice(1).map(([id]) => id), op: 'join', keepTools: false };
+        break;
+    }
+    this.part.features.push(f);
+    this.select(f.id);
+    this.changed();
+  }
+
   private addSweepOrLoft(type: 'sweep' | 'loft') {
     const sk = this.sketches();
     const base = { id: fid(), name: nextName(this.part, type), op: 'join' as BodyOp };
@@ -1617,7 +1823,7 @@ class PartEditor {
       type === 'sweep'
         ? { ...base, type, sketch: sk.at(-1)!.id, path: sk.at(-2)!.id }
         : { ...base, type, sketches: sk.slice(-2).map((s) => s.id), ruled: false };
-    if (this.part.features.some((x) => ['extrude', 'revolve', 'sweep', 'loft', 'import'].includes(x.type))) f.op = 'join';
+    
     this.part.features.push(f);
     this.select(f.id);
     this.changed();
