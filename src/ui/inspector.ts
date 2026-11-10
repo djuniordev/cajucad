@@ -8,6 +8,7 @@ import { el, esc, numberField, sliderRow, toast } from './dom';
 import { icon } from './icons';
 import { openFontPicker } from './fontPicker';
 import { filaments } from '../core/filaments';
+import { editPart, isPart } from '../part/actions';
 
 const AXES = ['x', 'y', 'z'] as const;
 
@@ -150,7 +151,7 @@ export class Inspector {
   private single(n: SceneNode) {
     const frag = el(`<div class="insp-scroll"></div>`);
     const wrapper = el(`<div></div>`);
-    wrapper.appendChild(this.head(n.name, KIND_LABEL[n.kind] ?? n.kind, n));
+    wrapper.appendChild(this.head(n.name, isPart(n) ? 'Peça paramétrica' : (KIND_LABEL[n.kind] ?? n.kind), n));
     wrapper.appendChild(frag);
     frag.appendChild(this.typeAndColor([n]));
     if (n.kind === 'text') frag.appendChild(this.textSection(n));
@@ -309,6 +310,10 @@ export class Inspector {
       b.onclick = fn;
       row.appendChild(b);
     };
+    if (isPart(n)) {
+      add('part', 'Editar peça (histórico)', () => editPart(n.id), true);
+      (row.lastElementChild as HTMLElement).style.flexBasis = '100%';
+    }
     if (n.kind === 'group') add('ungroup', 'Desagrupar', () => cmd.ungroupSelection(), true);
     add('copy', 'Duplicar', () => cmd.duplicateSelection([10, 10, 0]));
     add('drop', 'Soltar', () => cmd.dropToPlane());

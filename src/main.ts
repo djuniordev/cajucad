@@ -16,6 +16,7 @@ import { Inspector } from './ui/inspector';
 import { el, esc, showMenu, toast, closeMenu, type MenuItem } from './ui/dom';
 import { brandLogo, icon, shapeIcon } from './ui/icons';
 import { initUpdateBanner } from './ui/updateBanner';
+import { editPart, isPart, newPart } from './part/actions';
 
 const app = document.getElementById('app')!;
 const loading = document.body.appendChild(
@@ -83,6 +84,10 @@ const library = el(`
     <div class="panel-head"><span class="panel-title">Formas</span></div>
     <div class="lib-scroll">
       <div class="shape-grid"></div>
+      <div class="lib-section">
+        <span class="panel-title">Projeto</span>
+        <button class="btn soft part-new" data-tip="Esboço 2D, extrusão e revolução com histórico editável">${icon('part', 18)}<span>Nova peça paramétrica</span></button>
+      </div>
       <div class="lib-section">
         <span class="panel-title">Importar</span>
         <div class="drop-hint">${icon('upload', 20).replace('class="ic"', 'class="ic" style="margin:0 auto 6px"')}Solte STL, OBJ, 3MF, SVG ou arquivos de fonte aqui na tela, ou clique</div>
@@ -304,6 +309,7 @@ function contextMenu(x: number, y: number) {
   const sel = store.selected;
   showMenu(
     [
+      ...(sel.length === 1 && isPart(sel[0]) ? [{ label: 'Editar peça', icon: 'part', action: () => editPart(sel[0].id) }] : []),
       { label: 'Duplicar', icon: 'copy', kbd: 'Ctrl D', action: () => cmd.duplicateSelection([10, 10, 0]) },
       { label: sel.every((n) => n.hole) ? 'Tornar sólido' : 'Tornar furo', icon: 'hole', kbd: 'H', action: cmd.toggleHole },
       ...(sel.length > 1 ? [{ label: 'Agrupar', icon: 'group', kbd: 'Ctrl G', action: cmd.groupSelection }] : []),
@@ -356,6 +362,7 @@ snapbar.addEventListener('change', (e) => {
 });
 $('[data-act=space]', snapbar).onclick = () => settings.set('localSpace', !settings.localSpace);
 $('.drop-hint', library).onclick = () => fileInput.click();
+$('.part-new', library).onclick = () => newPart(viewTarget());
 
 // ---------- import / files ----------
 async function importFiles(files: FileList | File[]) {
@@ -420,7 +427,7 @@ addEventListener('drop', (e) => {
 // ---------- keyboard ----------
 addEventListener('keydown', (e) => {
   const t = e.target as HTMLElement;
-  if (t.matches('input, textarea, select')) return;
+  if (t.matches('input, textarea, select') || document.body.classList.contains('part-open')) return;
   const k = e.key.toLowerCase();
   const mod = e.ctrlKey || e.metaKey;
   const step = (settings.snap || 1) * (e.shiftKey ? 10 : 1);

@@ -1,0 +1,12 @@
+Motor de modelagem das peças paramétricas do CajuCAD
+=====================================================
+
+replicad (MIT License)
+  https://github.com/sgenoud/replicad
+
+replicad-opencascadejs: compilação para WebAssembly do Open CASCADE Technology
+  Licença: GNU Lesser General Public License v2.1 (LGPL-2.1), com a exceção da Open CASCADE
+  Código-fonte: https://github.com/sgenoud/replicad (pacote replicad-opencascadejs)
+                https://github.com/Open-Cascade-SAS/OCCT
+  O motor é carregado como um arquivo separado (replicad_single-*.wasm, na pasta assets do
+  aplicativo) e pode ser substituído por outra compilação compatível.

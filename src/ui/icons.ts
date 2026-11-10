@@ -55,6 +55,17 @@ const P: Record<string, string> = {
   sparkle: '<path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z"/>',
   keyboard: '<rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/>',
   link: '<path d="M10 14a4 4 0 005.7 0l3-3a4 4 0 00-5.7-5.7l-1 1"/><path d="M14 10a4 4 0 00-5.7 0l-3 3a4 4 0 005.7 5.7l1-1"/>',
+  // parametric part editor
+  sketch: '<path d="M4 20h16"/><path d="M6 16l9-9 3 3-9 9H6z"/>',
+  cursor: '<path d="M5 3l14 7-6 2-2 6z"/>',
+  line: '<circle cx="5" cy="19" r="1.6"/><circle cx="19" cy="5" r="1.6"/><path d="M6.2 17.8L17.8 6.2"/>',
+  rect: '<rect x="4" y="6" width="16" height="12" rx="1"/>',
+  circle: '<circle cx="12" cy="12" r="8"/><path d="M12 12h.01"/>',
+  arc: '<path d="M4 18a8 8 0 0116 0"/><circle cx="4" cy="18" r="1.4"/><circle cx="20" cy="18" r="1.4"/>',
+  polygon: '<path d="M12 3l8 5v8l-8 5-8-5V8z"/>',
+  extrude: '<path d="M4 17l8 4 8-4-8-4z"/><path d="M12 13V3M9 6l3-3 3 3"/>',
+  revolve: '<ellipse cx="12" cy="17" rx="8" ry="3"/><path d="M12 3v14"/><path d="M17 7a5 2 0 11-10 0"/>',
+  part: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M8 10h8M8 14h5"/>',
 };
 
 export function icon(name: keyof typeof P | string, size = 18) {
