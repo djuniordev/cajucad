@@ -80,9 +80,19 @@ function flatten(kind, name, depth = 0) {
   const file = nameIndex(kind).get(name);
   if (!file) throw new Error(`Preset não encontrado: ${kind}/${name}`);
   const own = readJson(file);
-  if (!own.inherits || depth > 8) return own;
+  // `include` pulls in template presets (the real start/end/filament-change G-code of newer printers lives there).
+  let included = {};
+  if (depth <= 8) {
+    for (const inc of own.include ?? []) {
+      if (!nameIndex(kind).has(inc)) continue;
+      const { name, instantiation, include, ...values } = readJson(nameIndex(kind).get(inc));
+      included = { ...included, ...values };
+    }
+  }
+  delete own.include;
+  if (!own.inherits || depth > 8) return { ...included, ...own };
   const parent = flatten(kind, own.inherits, depth + 1);
-  return { ...parent, ...own };
+  return { ...parent, ...included, ...own };
 }
 
 function listPrinters() {
