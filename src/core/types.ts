@@ -52,11 +52,30 @@ export interface MeshAsset {
   indices: number[];
 }
 
+/**
+ * Assembly joint: part `a` hangs on part `b` (both top-level nodes). When `b` moves, `a` follows;
+ * revolute and slider joints also turn or slide `a` by `value`.
+ */
+export interface Joint {
+  id: string;
+  a: string;
+  b: string;
+  kind: 'rigid' | 'revolute' | 'slider';
+  /** a's matrix relative to b's, with the joint at zero (column-major 4×4). */
+  rel: number[];
+  /** Joint origin and axis in b's local frame. */
+  origin: Vec3;
+  axis: Vec3;
+  /** Degrees (revolute) or millimetres (slider). */
+  value: number;
+}
+
 export interface DesignDoc {
   version: 1;
   title: string;
   nodes: SceneNode[];
   assets: Record<string, MeshAsset>;
+  joints?: Joint[];
 }
 
 export const emptyDoc = (): DesignDoc => ({

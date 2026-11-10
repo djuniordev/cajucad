@@ -13,6 +13,7 @@ import { desktop } from './desktop';
 import { openPrintDialog } from './ui/printDialog';
 import { Viewport, type GizmoMode } from './view/viewport';
 import { Inspector } from './ui/inspector';
+import { setSnapViewport } from './ui/snapMode';
 import { el, esc, showMenu, toast, closeMenu, type MenuItem } from './ui/dom';
 import { brandLogo, icon, shapeIcon } from './ui/icons';
 import { initUpdateBanner } from './ui/updateBanner';
@@ -153,6 +154,7 @@ function viewTarget(): [number, number, number] {
 async function boot() {
   await initGeometry();
   viewport = new Viewport(stage);
+  setSnapViewport(viewport);
   applyTheme();
   viewport.onContextMenu = (x, y) => contextMenu(x, y);
   viewport.onDimensionEdit = (axis, mm) => {

@@ -9,6 +9,8 @@ import { icon } from './icons';
 import { openFontPicker } from './fontPicker';
 import { filaments } from '../core/filaments';
 import { editPart, isPart } from '../part/actions';
+import { collisions, jointOf, removeJoint, updateJoint } from '../core/assembly';
+import { startSnap } from './snapMode';
 
 const AXES = ['x', 'y', 'z'] as const;
 
@@ -186,7 +188,48 @@ export class Inspector {
       frag.appendChild(el(`<div class="warn">Esta malha não é um sólido fechado (tem buracos ou faces soltas). Ela é exibida, mas não entra em furos, grupos nem na exportação STL.</div>`));
     }
     frag.appendChild(this.actions(n));
+    frag.appendChild(this.assembly(n));
     return wrapper;
+  }
+
+  private assembly(n: SceneNode) {
+    const s = el(`<div class="section"><div class="section-title">Montagem</div></div>`);
+    const j = jointOf(n.id);
+    if (!j) {
+      const b = el<HTMLButtonElement>(`<button class="btn soft" style="width:100%">${icon('link', 16)}<span>Encaixar em outra peça</span></button>`);
+      b.disabled = !!n.locked || store.doc.nodes.length < 2;
+      b.onclick = () => startSnap(n.id);
+      s.appendChild(b);
+      s.appendChild(el(`<div class="hint">Encosta uma face desta peça na face de outra e as mantém juntas.</div>`));
+      return s;
+    }
+    const base = store.find(j.b);
+    s.appendChild(el(`<div class="hint" style="margin-top:0">Junta com <b>${esc(base?.name ?? '?')}</b>: segue quando ela se move.</div>`));
+    const seg = el(`<div class="segmented" style="margin:8px 0;width:100%"></div>`);
+    for (const [k, label] of [['rigid', 'Rígida'], ['revolute', 'Giratória'], ['slider', 'Deslizante']] as const) {
+      const b = el<HTMLButtonElement>(`<button class="btn ${j.kind === k ? 'active' : ''}" style="flex:1">${label}</button>`);
+      b.onclick = () => updateJoint(j.id, { kind: k });
+      seg.appendChild(b);
+    }
+    s.appendChild(seg);
+    if (j.kind !== 'rigid') {
+      const rev = j.kind === 'revolute';
+      s.appendChild(
+        this.keyed('joint-v', sliderRow({
+          label: rev ? 'Ângulo' : 'Deslocamento',
+          value: j.value,
+          min: rev ? -180 : -50,
+          max: rev ? 180 : 50,
+          step: rev ? 1 : 0.5,
+          unit: rev ? '°' : 'mm',
+          onCommit: (v) => updateJoint(j.id, { value: rev ? wrapDeg(v) : v }),
+        })),
+      );
+    }
+    const free = el<HTMLButtonElement>(`<button class="btn soft" style="width:100%;margin-top:8px">${icon('unlock', 16)}<span>Soltar junta</span></button>`);
+    free.onclick = () => removeJoint(j.id);
+    s.appendChild(free);
+    return s;
   }
 
   private isSolidMesh(n: SceneNode) {
@@ -368,6 +411,16 @@ export class Inspector {
     drop.onclick = () => cmd.dropToPlane();
     tools.querySelector('.row')!.append(dup, drop);
     body.appendChild(tools);
+    const col = el(`<div class="section"></div>`);
+    const cb = el<HTMLButtonElement>(`<button class="btn soft" style="width:100%">${icon('solid', 16)} Verificar colisão</button>`);
+    cb.onclick = () => {
+      const hits = collisions(nodes.map((n) => n.id));
+      if (!hits.length) return toast('Nenhuma peça está invadindo outra.');
+      const fmt = (v: number) => v.toLocaleString('pt-BR', { maximumFractionDigits: 1 });
+      toast(hits.map((h) => `${h.a} × ${h.b}: ${fmt(h.volume)} mm³`).join(' · '), 'error', 6000);
+    };
+    col.appendChild(cb);
+    body.appendChild(col);
     return wrapper;
   }
 }

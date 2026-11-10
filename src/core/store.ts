@@ -35,12 +35,21 @@ class Store {
     this.selListeners.forEach((f) => f());
   }
 
+  /** Runs around every commit (assembly joints keep parts together). */
+  private hooks: { before: (doc: DesignDoc) => unknown; after: (doc: DesignDoc, snap: unknown) => void }[] = [];
+
+  addCommitHook<T>(before: (doc: DesignDoc) => T, after: (doc: DesignDoc, snap: T) => void) {
+    this.hooks.push({ before, after: after as (doc: DesignDoc, snap: unknown) => void });
+  }
+
   /** Apply a mutation as one undoable step. */
   commit(mutate: (doc: DesignDoc) => void) {
     this.past.push(JSON.stringify(this.doc));
     if (this.past.length > HISTORY_LIMIT) this.past.shift();
     this.future = [];
+    const snaps = this.hooks.map((h) => h.before(this.doc));
     mutate(this.doc);
+    this.hooks.forEach((h, i) => h.after(this.doc, snaps[i]));
     this.pruneSelection();
     this.emitDoc();
   }

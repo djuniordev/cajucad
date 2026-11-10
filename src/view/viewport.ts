@@ -7,6 +7,7 @@ import { store } from '../core/store';
 import { colorSig, decompose, nodeMatrix, rawAssetGeometry, renderGeometry, renderPieces, shapeKey, worldBounds } from '../core/geometry';
 import { ResizeHandles } from './handles';
 import type { SceneNode, Vec3 } from '../core/types';
+import type { SurfaceHit } from '../core/assembly';
 import { settings } from '../core/settings';
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
@@ -45,6 +46,8 @@ export class Viewport {
   private dimLabels: CSS2DObject[] = [];
   private gridMat: THREE.ShaderMaterial;
   private raycaster = new THREE.Raycaster();
+  /** When set, the next left click reports the surface under it instead of selecting (assembly). */
+  surfacePick: ((hit: SurfaceHit | null) => void) | null = null;
   private hovered: string | null = null;
   private dragStart: { pivot: THREE.Matrix4; nodes: Map<string, THREE.Matrix4> } | null = null;
   private anim: { from: [THREE.Vector3, THREE.Vector3]; to: [THREE.Vector3, THREE.Vector3]; t0: number } | null = null;
@@ -513,6 +516,11 @@ export class Viewport {
         rightMoved = false;
         return;
       }
+      if (e.button === 0 && this.surfacePick) {
+        const done = this.surfacePick;
+        done(this.pickSurface(e.clientX, e.clientY));
+        return;
+      }
       if (e.button !== 0 || gizmoActive() || this.handles.active) return;
       const additive = e.shiftKey || e.ctrlKey || e.metaKey;
       this.raycaster.setFromCamera(this.ndc(e.clientX, e.clientY), this.camera);
@@ -543,6 +551,10 @@ export class Viewport {
       }
 
       if (e.buttons) return;
+      if (this.surfacePick) {
+        el.style.cursor = this.pick(e.clientX, e.clientY) ? 'crosshair' : '';
+        return;
+      }
       const id = this.pick(e.clientX, e.clientY);
       if (id !== this.hovered) {
         const prev = this.hovered;
@@ -694,6 +706,20 @@ export class Viewport {
   private ndc(x: number, y: number) {
     const r = this.renderer.domElement.getBoundingClientRect();
     return new THREE.Vector2(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1);
+  }
+
+  /** Part, point and outward face normal (world) under the cursor. */
+  pickSurface(x: number, y: number): SurfaceHit | null {
+    this.raycaster.setFromCamera(this.ndc(x, y), this.camera);
+    const meshes = [...this.views.values()].filter((v) => v.root.visible).flatMap((v) => v.parts.map((p) => p.mesh));
+    const hit = this.raycaster.intersectObjects(meshes, false)[0];
+    const id = hit?.object.userData.nodeId as string | undefined;
+    if (!hit?.face || !id) return null;
+    const n = hit.face.normal.clone().applyMatrix3(new THREE.Matrix3().getNormalMatrix(hit.object.matrixWorld)).normalize();
+    // Faces seen from behind (inside of a hole) still face the camera side.
+    if (n.dot(this.raycaster.ray.direction) > 0) n.negate();
+    const r = (v: number) => Math.round(v * 1e4) / 1e4;
+    return { id, point: [r(hit.point.x), r(hit.point.y), r(hit.point.z)], normal: [r(n.x), r(n.y), r(n.z)] };
   }
 
   pick(x: number, y: number): string | null {
