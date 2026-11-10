@@ -68,13 +68,28 @@ function primitives(s: SketchFeature, drag?: { ref: PointRef; to: V2 }): SketchP
       point(`${e.id}:c`, a.c);
       out.push({ id: e.id, type: 'arc', c_id: `${e.id}:c`, start_id: `${e.id}:${a.start}`, end_id: `${e.id}:${a.end}`, radius: a.r, start_angle: a.sa, end_angle: a.ea });
       out.push({ id: `${e.id}:rules`, type: 'arc_rules', a_id: e.id });
+    } else if (e.t === 'spline') {
+      // A spline's ends can be attached; its inner points are moved by hand.
+      point(`${e.id}:a`, e.pts[0]);
+      point(`${e.id}:b`, e.pts[e.pts.length - 1]);
     } else {
-      // Rectangles and polygons only expose their centre.
+      // Rectangles, polygons, ellipses and text only expose their centre.
       point(`${e.id}:c`, e.c);
     }
   }
+  // Points joined by coincidences, to tell when two curves meet end to end.
+  const group = new Map<string, string>();
+  const find = (x: string): string => {
+    const g = group.get(x);
+    return !g || g === x ? x : find(g);
+  };
+  for (const c of s.constraints ?? []) if (c.t === 'coincident') group.set(find(pid(c.p1)), find(pid(c.p2)));
+  const shared = (e1: string, e2: string): [string, string] | null => {
+    for (const p of ['a', 'b']) for (const q of ['a', 'b']) if (find(`${e1}:${p}`) === find(`${e2}:${q}`)) return [`${e1}:${p}`, `${e2}:${q}`];
+    return null;
+  };
   for (const c of s.constraints ?? []) {
-    const p = constraintPrims(c, kind);
+    const p = constraintPrims(c, kind, shared);
     out.push(...p);
   }
   if (drag) {
@@ -84,7 +99,7 @@ function primitives(s: SketchFeature, drag?: { ref: PointRef; to: V2 }): SketchP
   return out;
 }
 
-function constraintPrims(c: SketchConstraint, kind: Map<string, SketchEntity['t']>): SketchPrimitive[] {
+function constraintPrims(c: SketchConstraint, kind: Map<string, SketchEntity['t']>, shared: (e1: string, e2: string) => [string, string] | null): SketchPrimitive[] {
   const id = c.id;
   const k = (e: string) => kind.get(e);
   const round = (e: string) => k(e) === 'circle' || k(e) === 'arc';
@@ -114,6 +129,11 @@ function constraintPrims(c: SketchConstraint, kind: Map<string, SketchEntity['t'
       if (k(e1) === 'circle' && k(e2) === 'arc') [e1, e2] = [e1, e2];
       else if (k(e1) === 'arc' && k(e2) === 'circle') [e1, e2] = [e2, e1];
       const pair = `${k(e1)}-${k(e2)}`;
+      // Curves joined end to end: tangency through the shared point. (Tangent plus coincident
+      // on the same point is singular for the solver and shows up as redundant.)
+      const end = pair === 'line-arc' || pair === 'arc-arc' ? shared(e1, e2) : null;
+      if (end && pair === 'line-arc') return [{ id, type: 'perpendicular_pppp', l1p1_id: `${e1}:a`, l1p2_id: `${e1}:b`, l2p1_id: `${e2}:c`, l2p2_id: end[1] }];
+      if (end && pair === 'arc-arc') return [{ id, type: 'point_on_line_ppp', p_id: end[0], lp1_id: `${e1}:c`, lp2_id: `${e2}:c` }];
       if (pair === 'line-circle') return [{ id, type: 'tangent_lc', l_id: e1, c_id: e2 }];
       if (pair === 'line-arc') return [{ id, type: 'tangent_la', l_id: e1, a_id: e2 }];
       if (pair === 'circle-circle') return [{ id, type: 'tangent_cc', c1_id: e1, c2_id: e2 }];
@@ -125,6 +145,8 @@ function constraintPrims(c: SketchConstraint, kind: Map<string, SketchEntity['t'
       return round(c.e1) && round(c.e2) ? [{ id, type: 'p2p_coincident', p1_id: `${c.e1}:c`, p2_id: `${c.e2}:c` }] : [];
     case 'midpoint':
       return k(c.e) === 'line' ? [{ id, type: 'p2p_symmetric_ppp', p1_id: `${c.e}:a`, p2_id: `${c.e}:b`, p_id: pid(c.p) }] : [];
+    case 'symmetric':
+      return k(c.e) === 'line' ? [{ id, type: 'p2p_symmetric_ppl', p1_id: pid(c.p1), p2_id: pid(c.p2), l_id: c.e }] : [];
     case 'onEntity': {
       if (k(c.e) === 'line') return [{ id, type: 'point_on_line_pl', p_id: pid(c.p), l_id: c.e }];
       if (k(c.e) === 'circle') return [{ id, type: 'point_on_circle', p_id: pid(c.p), c_id: c.e }];
@@ -197,6 +219,9 @@ export async function solveSketch(s: SketchFeature, drag?: { ref: PointRef; to: 
         e.b = pt(`${e.id}:b`) ?? e.b;
         const mid = (a.start_angle + a.end_angle) / 2;
         e.m = [c[0] + a.radius * Math.cos(mid), c[1] + a.radius * Math.sin(mid)];
+      } else if (e.t === 'spline') {
+        e.pts[0] = pt(`${e.id}:a`) ?? e.pts[0];
+        e.pts[e.pts.length - 1] = pt(`${e.id}:b`) ?? e.pts[e.pts.length - 1];
       } else e.c = pt(`${e.id}:c`) ?? e.c;
     }
     let dof: number | null = null;

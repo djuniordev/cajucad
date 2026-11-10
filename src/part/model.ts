@@ -14,7 +14,23 @@ export type SketchEntity =
   | { id: string; t: 'circle'; c: V2; r: number; construction?: boolean }
   | { id: string; t: 'rect'; c: V2; w: number; h: number; construction?: boolean }
   /** Regular polygon: centre, circumradius, number of sides. */
-  | { id: string; t: 'polygon'; c: V2; r: number; n: number; construction?: boolean };
+  | { id: string; t: 'polygon'; c: V2; r: number; n: number; construction?: boolean }
+  /** Ellipse: centre, half-width and half-height before turning `rot` degrees. */
+  | { id: string; t: 'ellipse'; c: V2; rx: number; ry: number; rot: number; construction?: boolean }
+  /** Smooth curve through the points (ends are its `a` and `b`). */
+  | { id: string; t: 'spline'; pts: V2[]; construction?: boolean }
+  /** Text outline, kept centred on the origin and placed at `c`, turned `rot` degrees. */
+  | { id: string; t: 'text'; c: V2; text: string; size: number; font: string; rot: number; outline: V2[][]; construction?: boolean };
+
+/** Picture traced over in a sketch (data URL), centred at `c`, `w` mm wide. */
+export interface SketchImage {
+  src: string;
+  c: V2;
+  w: number;
+  /** Height / width of the picture. */
+  aspect: number;
+  opacity: number;
+}
 
 export type PlaneName = 'XY' | 'XZ' | 'YZ';
 
@@ -27,6 +43,8 @@ export type SketchConstraint =
   | { id: string; t: 'parallel' | 'perpendicular' | 'equal' | 'tangent' | 'concentric'; e1: string; e2: string }
   /** Point on the middle of a line. */
   | { id: string; t: 'midpoint'; p: PointRef; e: string }
+  /** p1 and p2 mirror each other across line e. */
+  | { id: string; t: 'symmetric'; p1: PointRef; p2: PointRef; e: string }
   /** Point lying on a line, circle or arc. */
   | { id: string; t: 'onEntity'; p: PointRef; e: string }
   | { id: string; t: 'fix'; p: PointRef; at: V2 }
@@ -48,7 +66,60 @@ export interface SketchFeature {
   offset: number;
   entities: SketchEntity[];
   constraints?: SketchConstraint[];
+  image?: SketchImage;
 }
+
+/** Ends of an open curve (lines, arcs, splines). */
+export function curveEnds(e: SketchEntity): [V2, V2] | null {
+  if (e.t === 'line' || e.t === 'arc') return [e.a, e.b];
+  if (e.t === 'spline' && e.pts.length >= 2) return [e.pts[0], e.pts[e.pts.length - 1]];
+  return null;
+}
+
+/** Turn a point by `deg` degrees around the origin. */
+export const rot2 = (p: V2, deg: number): V2 => {
+  const a = (deg * Math.PI) / 180, c = Math.cos(a), s = Math.sin(a);
+  return [p[0] * c - p[1] * s, p[0] * s + p[1] * c];
+};
+
+/**
+ * Cubic Bézier pieces of a smooth curve through `pts` (Catmull-Rom): [start, control 1, control 2, end].
+ * The kernel and the preview both use these, so what you see is what gets built.
+ */
+export function splineBeziers(pts: V2[]): [V2, V2, V2, V2][] {
+  const out: [V2, V2, V2, V2][] = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const p0 = pts[Math.max(0, i - 1)], p1 = pts[i], p2 = pts[i + 1], p3 = pts[Math.min(pts.length - 1, i + 2)];
+    out.push([p1, [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6], [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6], p2]);
+  }
+  return out;
+}
+
+export function splinePoints(pts: V2[], steps = 16): V2[] {
+  const out: V2[] = [pts[0]];
+  for (const [a, b, c, d] of splineBeziers(pts))
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps, u = 1 - t;
+      const k = [u * u * u, 3 * u * u * t, 3 * u * t * t, t * t * t];
+      out.push([k[0] * a[0] + k[1] * b[0] + k[2] * c[0] + k[3] * d[0], k[0] * a[1] + k[1] * b[1] + k[2] * c[1] + k[3] * d[1]]);
+    }
+  return out;
+}
+
+export function ellipsePoints(e: { c: V2; rx: number; ry: number; rot: number }, steps = 64): V2[] {
+  return Array.from({ length: steps }, (_, i) => {
+    const t = (i / steps) * 2 * Math.PI;
+    const p = rot2([e.rx * Math.cos(t), e.ry * Math.sin(t)], e.rot);
+    return [p[0] + e.c[0], p[1] + e.c[1]] as V2;
+  });
+}
+
+/** Text outlines placed in the sketch. */
+export const textContours = (e: { c: V2; rot: number; outline: V2[][] }): V2[][] =>
+  e.outline.map((c) => c.map((p) => {
+    const q = rot2(p, e.rot);
+    return [q[0] + e.c[0], q[1] + e.c[1]] as V2;
+  }));
 
 /** Coordinates of a referenced point, or null when its entity is gone. */
 export function refPoint(entities: SketchEntity[], r: PointRef): V2 | null {
@@ -59,7 +130,8 @@ export function refPoint(entities: SketchEntity[], r: PointRef): V2 | null {
     if (e.t === 'arc') return circleThrough(e.a, e.m, e.b)?.c ?? null;
     return 'c' in e ? e.c : null;
   }
-  return e.t === 'line' || e.t === 'arc' ? e[r.p] : null;
+  const ends = curveEnds(e);
+  return ends ? ends[r.p === 'a' ? 0 : 1] : null;
 }
 
 export const sameRef = (a: PointRef, b: PointRef) => (a === 'origin' || b === 'origin' ? a === b : a.e === b.e && a.p === b.p);
@@ -278,16 +350,32 @@ const EPS = 1e-4;
 const same = (a: V2, b: V2) => Math.abs(a[0] - b[0]) < EPS && Math.abs(a[1] - b[1]) < EPS;
 
 /** A closed outline made of line and three-point-arc segments, or a full circle. */
+export type Seg = { t: 'line'; to: V2 } | { t: 'arc'; m: V2; to: V2 } | { t: 'spline'; via: V2[]; to: V2 };
 export type Profile =
   | { kind: 'circle'; c: V2; r: number }
-  | { kind: 'path'; start: V2; segs: ({ t: 'line'; to: V2 } | { t: 'arc'; m: V2; to: V2 })[] };
+  | { kind: 'ellipse'; c: V2; rx: number; ry: number; rot: number }
+  | { kind: 'path'; start: V2; segs: Seg[] };
+
+/** An open curve as a segment going from `from` (one of its ends) to the other end. */
+function curveSeg(e: SketchEntity, from: V2): Seg | null {
+  if (e.t === 'line') return { t: 'line', to: same(e.a, from) ? e.b : e.a };
+  if (e.t === 'arc') return { t: 'arc', m: e.m, to: same(e.a, from) ? e.b : e.a };
+  if (e.t === 'spline') {
+    const pts = same(e.pts[0], from) ? e.pts : [...e.pts].reverse();
+    return { t: 'spline', via: pts.slice(1, -1), to: pts[pts.length - 1] };
+  }
+  return null;
+}
 
 /**
  * The one path of a sketch for a sweep: its lines and arcs chained end to end from a free end
  * (or around, when they close), or a lone circle. Null when there is no single path.
  */
-export function sketchPath(entities: SketchEntity[]): { start: V2; segs: Extract<Profile, { kind: 'path' }>['segs']; closed: boolean } | { circle: { c: V2; r: number } } | null {
-  const segs = entities.filter((e): e is Extract<SketchEntity, { t: 'line' | 'arc' }> => !e.construction && (e.t === 'line' || e.t === 'arc') && !same(e.a, e.b));
+export function sketchPath(entities: SketchEntity[]): { start: V2; segs: Seg[]; closed: boolean } | { circle: { c: V2; r: number } } | null {
+  const segs = entities.flatMap((e) => {
+    const ends = e.construction ? null : curveEnds(e);
+    return ends && !same(ends[0], ends[1]) ? [{ e, a: ends[0], b: ends[1] }] : [];
+  });
   if (!segs.length) {
     const c = entities.find((e) => !e.construction && e.t === 'circle');
     return c && c.t === 'circle' ? { circle: { c: c.c, r: c.r } } : null;
@@ -296,16 +384,15 @@ export function sketchPath(entities: SketchEntity[]): { start: V2; segs: Extract
   const free = segs.flatMap((s) => [s.a, s.b]).find((p) => degree(p) === 1);
   const start = free ?? segs[0].a;
   const used = new Set<number>();
-  const out: Extract<Profile, { kind: 'path' }>['segs'] = [];
+  const out: Seg[] = [];
   let end = start;
   for (;;) {
     const j = segs.findIndex((s, k) => !used.has(k) && (same(s.a, end) || same(s.b, end)));
     if (j < 0) break;
     used.add(j);
-    const s = segs[j];
-    const to = same(s.a, end) ? s.b : s.a;
-    out.push(s.t === 'arc' ? { t: 'arc', m: s.m, to } : { t: 'line', to });
-    end = to;
+    const seg = curveSeg(segs[j].e, end)!;
+    out.push(seg);
+    end = seg.to;
   }
   if (used.size !== segs.length) return null;
   return { start, segs: out, closed: same(end, start) };
@@ -314,23 +401,28 @@ export function sketchPath(entities: SketchEntity[]): { start: V2; segs: Extract
 /** Closed outlines of a sketch: closed entities as they are, open lines/arcs chained end to end. */
 export function sketchProfiles(entities: SketchEntity[]): { profiles: Profile[]; openEnds: V2[] } {
   const profiles: Profile[] = [];
-  type Seg = { a: V2; b: V2; m?: V2 };
-  const open: Seg[] = [];
+  const open: { e: SketchEntity; a: V2; b: V2 }[] = [];
+  const poly = (pts: V2[]): Profile => ({ kind: 'path', start: pts[0], segs: [...pts.slice(1), pts[0]].map((to) => ({ t: 'line' as const, to })) });
   for (const e of entities) {
     if (e.construction) continue;
     if (e.t === 'circle' && e.r > 0) profiles.push({ kind: 'circle', c: e.c, r: e.r });
-    else if (e.t === 'rect' && e.w > 0 && e.h > 0) {
+    else if (e.t === 'ellipse' && e.rx > 0 && e.ry > 0) profiles.push({ kind: 'ellipse', c: e.c, rx: e.rx, ry: e.ry, rot: e.rot });
+    else if (e.t === 'text') {
+      for (const c of textContours(e)) if (c.length >= 3) profiles.push(poly(c));
+    } else if (e.t === 'spline' && e.pts.length >= 3 && same(e.pts[0], e.pts[e.pts.length - 1])) {
+      profiles.push({ kind: 'path', start: e.pts[0], segs: [curveSeg(e, e.pts[0])!] });
+    } else if (e.t === 'rect' && e.w > 0 && e.h > 0) {
       const [x, y] = e.c, w = e.w / 2, h = e.h / 2;
-      const pts: V2[] = [[x - w, y - h], [x + w, y - h], [x + w, y + h], [x - w, y + h]];
-      profiles.push({ kind: 'path', start: pts[0], segs: [...pts.slice(1), pts[0]].map((to) => ({ t: 'line' as const, to })) });
+      profiles.push(poly([[x - w, y - h], [x + w, y - h], [x + w, y + h], [x - w, y + h]]));
     } else if (e.t === 'polygon' && e.r > 0 && e.n >= 3) {
-      const pts = Array.from({ length: e.n }, (_, i) => {
+      profiles.push(poly(Array.from({ length: e.n }, (_, i) => {
         const a = Math.PI / 2 + (i * 2 * Math.PI) / e.n;
         return [e.c[0] + e.r * Math.cos(a), e.c[1] + e.r * Math.sin(a)] as V2;
-      });
-      profiles.push({ kind: 'path', start: pts[0], segs: [...pts.slice(1), pts[0]].map((to) => ({ t: 'line' as const, to })) });
-    } else if (e.t === 'line' && !same(e.a, e.b)) open.push({ a: e.a, b: e.b });
-    else if (e.t === 'arc' && !same(e.a, e.b)) open.push({ a: e.a, b: e.b, m: e.m });
+      })));
+    } else {
+      const ends = curveEnds(e);
+      if (ends && !same(ends[0], ends[1])) open.push({ e, a: ends[0], b: ends[1] });
+    }
   }
 
   // Chain open segments into loops (either direction).
@@ -340,23 +432,16 @@ export function sketchProfiles(entities: SketchEntity[]): { profiles: Profile[];
     if (used.has(i)) continue;
     used.add(i);
     const start = open[i].a;
-    const segs: ({ t: 'line'; to: V2 } | { t: 'arc'; m: V2; to: V2 })[] = [open[i].m ? { t: 'arc', m: open[i].m!, to: open[i].b } : { t: 'line', to: open[i].b }];
+    const segs: Seg[] = [curveSeg(open[i].e, start)!];
     let end = open[i].b;
     let closed = same(end, start);
     while (!closed) {
-      let next = -1;
-      let flip = false;
-      for (let j = 0; j < open.length; j++) {
-        if (used.has(j)) continue;
-        if (same(open[j].a, end)) { next = j; break; }
-        if (same(open[j].b, end)) { next = j; flip = true; break; }
-      }
+      const next = open.findIndex((s, j) => !used.has(j) && (same(s.a, end) || same(s.b, end)));
       if (next < 0) break;
       used.add(next);
-      const s = open[next];
-      const to = flip ? s.a : s.b;
-      segs.push(s.m ? { t: 'arc', m: s.m, to } : { t: 'line', to });
-      end = to;
+      const seg = curveSeg(open[next].e, end)!;
+      segs.push(seg);
+      end = seg.to;
       closed = same(end, start);
     }
     if (closed) profiles.push({ kind: 'path', start, segs });
@@ -368,10 +453,12 @@ export function sketchProfiles(entities: SketchEntity[]): { profiles: Profile[];
 /** Polygon approximation of a profile (for containment tests and previews). */
 export function profilePoints(p: Profile, steps = 24): V2[] {
   if (p.kind === 'circle') return Array.from({ length: steps * 2 }, (_, i) => [p.c[0] + p.r * Math.cos((i / (steps * 2)) * 2 * Math.PI), p.c[1] + p.r * Math.sin((i / (steps * 2)) * 2 * Math.PI)] as V2);
+  if (p.kind === 'ellipse') return ellipsePoints(p, steps * 2);
   const pts: V2[] = [p.start];
   let cur = p.start;
   for (const s of p.segs) {
     if (s.t === 'line') pts.push(s.to);
+    else if (s.t === 'spline') pts.push(...splinePoints([cur, ...s.via, s.to], Math.max(4, steps >> 1)).slice(1));
     else pts.push(...arcPoints(cur, s.m, s.to, steps).slice(1));
     cur = s.to;
   }

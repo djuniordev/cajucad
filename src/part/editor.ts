@@ -17,6 +17,10 @@ import {
   arcPoints,
   circleThrough,
   constraintEntities,
+  curveEnds,
+  ellipsePoints,
+  splinePoints,
+  textContours,
   featureSketches,
   fid,
   isDimension,
@@ -45,11 +49,14 @@ import {
   type V3,
 } from './model';
 import { loadSolver, solveSketch } from './solver';
+import { autoConstrain, corner, extend, offset, parseDxf, slot, trim } from './sketchOps';
+import { DEFAULT_FONT_ID, listFaces, loadFont, textToPolygons } from '../core/fonts';
 import './part.css';
 
-type DrawTool = 'select' | 'line' | 'rect' | 'circle' | 'arc' | 'polygon';
-type ConTool = 'dim' | 'coincident' | 'horizontal' | 'vertical' | 'parallel' | 'perpendicular' | 'equal' | 'tangent' | 'concentric' | 'midpoint' | 'onEntity' | 'fix' | 'angle';
-type Tool = DrawTool | ConTool;
+type DrawTool = 'select' | 'line' | 'rect' | 'circle' | 'arc' | 'polygon' | 'ellipse' | 'spline' | 'slot' | 'text';
+type ModTool = 'trim' | 'extend' | 'offset' | 'sfillet' | 'schamfer';
+type ConTool = 'dim' | 'coincident' | 'horizontal' | 'vertical' | 'parallel' | 'perpendicular' | 'equal' | 'tangent' | 'concentric' | 'midpoint' | 'onEntity' | 'fix' | 'angle' | 'symmetric';
+type Tool = DrawTool | ModTool | ConTool;
 /** What a constraint tool asks for, click by click: p point, l line, r circle/arc, e any curve. */
 type Need = 'p' | 'l' | 'r' | 'e';
 type Pick = { ref: PointRef } | { e: string };
@@ -68,11 +75,12 @@ const CTOOLS: { id: ConTool; label: string; glyph: string; key?: string; need: N
   { id: 'onEntity', label: 'Ponto sobre', glyph: '∈', need: ['p', 'e'], hint: 'Clique um ponto e depois a linha, círculo ou arco onde ele fica.' },
   { id: 'fix', label: 'Fixar', glyph: '⚓', need: ['p'], hint: 'Clique um ponto para travá-lo onde está.' },
   { id: 'angle', label: 'Ângulo', glyph: '∠', need: ['l', 'l'], hint: 'Clique duas linhas.' },
+  { id: 'symmetric', label: 'Simetria', glyph: '⇋', need: ['p', 'p', 'l'], hint: 'Clique dois pontos e depois a linha que fica no meio deles (o espelho).' },
 ];
 const CLABEL: Record<SketchConstraint['t'], string> = {
   coincident: 'Coincidente', horizontal: 'Horizontal', vertical: 'Vertical', parallel: 'Paralela', perpendicular: 'Perpendicular', equal: 'Igual',
   tangent: 'Tangente', concentric: 'Concêntrica', midpoint: 'Ponto médio', onEntity: 'Ponto sobre', fix: 'Fixo', length: 'Comprimento',
-  diameter: 'Diâmetro', distance: 'Distância', angle: 'Ângulo',
+  diameter: 'Diâmetro', distance: 'Distância', angle: 'Ângulo', symmetric: 'Simetria',
 };
 const GLYPH: Partial<Record<SketchConstraint['t'], string>> = Object.fromEntries(CTOOLS.map((t) => [t.id, t.glyph]));
 
@@ -86,7 +94,20 @@ const TOOLS: { id: DrawTool; label: string; key: string; hint: string }[] = [
   { id: 'circle', label: 'Círculo', key: 'C', hint: 'Clique o centro e depois um ponto da borda.' },
   { id: 'arc', label: 'Arco', key: 'A', hint: 'Clique o início, o fim e depois um ponto por onde o arco passa.' },
   { id: 'polygon', label: 'Polígono', key: 'P', hint: 'Clique o centro e depois um vértice.' },
+  { id: 'ellipse', label: 'Elipse', key: 'E', hint: 'Clique o centro, depois a ponta do eixo maior e depois a altura.' },
+  { id: 'spline', label: 'Spline', key: 'S', hint: 'Clique os pontos da curva. Enter ou Esc termina; clicar no primeiro ponto fecha.' },
+  { id: 'slot', label: 'Rasgo', key: 'O', hint: 'Clique o centro de uma ponta, o da outra e depois a largura.' },
+  { id: 'text', label: 'Texto', key: 'X', hint: 'Clique onde o texto fica. Depois edite o texto e o tamanho no painel.' },
 ];
+
+const MTOOLS: { id: ModTool; label: string; icon: string; key: string; hint: string }[] = [
+  { id: 'trim', label: 'Aparar', icon: 'trim', key: 'T', hint: 'Clique no pedaço de linha, arco ou círculo que sai (até onde ele cruza outras linhas).' },
+  { id: 'extend', label: 'Estender', icon: 'extend', key: 'W', hint: 'Clique perto da ponta de uma linha para levá-la até a próxima linha.' },
+  { id: 'offset', label: 'Offset', icon: 'offset', key: 'F', hint: 'Clique numa linha, arco ou círculo: copia o contorno ligado a ela na distância escolhida (positivo = para fora).' },
+  { id: 'sfillet', label: 'Filete', icon: 'fillet', key: 'G', hint: 'Clique no canto entre duas linhas para arredondar.' },
+  { id: 'schamfer', label: 'Chanfro', icon: 'chamfer', key: 'K', hint: 'Clique no canto entre duas linhas para chanfrar.' },
+];
+const isMod = (t: Tool): t is ModTool => MTOOLS.some((m) => m.id === t);
 
 const OPS: [BodyOp, string][] = [
   ['join', 'Juntar'],
@@ -154,6 +175,11 @@ class PartEditor {
   private marksKey = '';
   private gridStep = 1;
   private polygonSides = 6;
+  /** Offset distance, sketch fillet radius or chamfer size. */
+  private modSize = 2;
+  /** Inner point of a spline being dragged (not a solver point). */
+  private splineDrag: { e: string; i: number } | null = null;
+  private imageTex: { src: string; tex: THREE.Texture } | null = null;
 
   // view
   private root: HTMLElement;
@@ -844,7 +870,9 @@ class PartEditor {
 
   private sketchPanel() {
     const s = this.sketchFeature!;
-    const tool = TOOLS.find((t) => t.id === this.tool) ?? CTOOLS.find((t) => t.id === this.tool)!;
+    const tool = TOOLS.find((t) => t.id === this.tool) ?? MTOOLS.find((t) => t.id === this.tool) ?? CTOOLS.find((t) => t.id === this.tool)!;
+    const modLabel = this.tool === 'offset' ? 'Distância' : this.tool === 'sfillet' ? 'Raio' : this.tool === 'schamfer' ? 'Tamanho' : '';
+    const img = s.image;
     const ent = s.entities.find((e) => e.id === this.selEntity);
     const con = s.constraints?.find((c) => c.id === this.selConstraint);
     const { openEnds } = sketchProfiles(s.entities);
@@ -855,13 +883,22 @@ class PartEditor {
       <div class="panel-title">${esc(s.name)} · ${PLANES[s.plane].label}</div>
       ${dof}
       <div class="pe-tools">${TOOLS.map((t) => `<button class="btn ${t.id === this.tool ? 'active' : ''}" data-tool="${t.id}" data-tip="${t.label} (${t.key})">${icon(t.id === 'select' ? 'cursor' : t.id, 18)}<span>${t.label}</span></button>`).join('')}</div>
+      <div class="panel-title">Modificar</div>
+      <div class="pe-mtools">${MTOOLS.map((t) => `<button class="btn ${t.id === this.tool ? 'active' : ''}" data-tool="${t.id}" data-tip="${t.label} (${t.key})">${icon(t.icon, 17)}<span>${t.label}</span></button>`).join('')}</div>
       <div class="panel-title">Restrições</div>
       <div class="pe-ctools">${CTOOLS.map((t) => `<button class="btn ${t.id === this.tool ? 'active' : ''}" data-tool="${t.id}" data-tip="${t.label}${t.key ? ` (${t.key})` : ''}">${t.glyph}</button>`).join('')}</div>
       <div class="hint">${esc(tool.hint)}</div>
       <div class="pe-row">
         <label class="pe-field"><span>Grade</span><select data-k="grid">${[0, 0.5, 1, 5, 10].map((g) => `<option value="${g}" ${g === this.gridStep ? 'selected' : ''}>${g ? `${fmt(g)} mm` : 'Livre'}</option>`).join('')}</select></label>
         ${this.tool === 'polygon' ? `<label class="pe-field"><span>Lados</span><span class="field"><input data-k="sides" value="${this.polygonSides}" inputmode="numeric"/></span></label>` : ''}
+        ${modLabel ? this.numField(modLabel, 'modsize', this.modSize) : ''}
       </div>
+      <div class="pe-row">
+        <button class="btn soft" style="flex:1" data-act="auto-constrain" data-tip="Junta pontas que se tocam e deixa retas as linhas quase retas">${icon('sparkle', 15)} Auto</button>
+        <button class="btn soft" style="flex:1" data-act="import-dxf" data-tip="Trazer linhas, arcos e curvas de um arquivo DXF">${icon('import', 15)} DXF</button>
+        <button class="btn soft" style="flex:1" data-act="bg-image" data-tip="Imagem de fundo para copiar o desenho por cima">${icon('image', 15)} Imagem</button>
+      </div>
+      ${img ? `<div class="pe-params"><div class="panel-title">Imagem de fundo</div><div class="pe-row">${this.numField('Largura', 'img.w', img.w)}${this.numField('Opacidade', 'img.opacity', Math.round(img.opacity * 100), '%')}</div><div class="pe-row">${this.numField('Centro X', 'img.c.0', img.c[0])}${this.numField('Y', 'img.c.1', img.c[1])}</div><button class="btn soft wide danger" data-act="bg-remove">${icon('trash', 15)} Tirar imagem</button></div>` : ''}
       ${con ? `<div class="pe-params"><div class="panel-title">${CLABEL[con.t]}</div>${isDimension(con) ? this.numField('Valor', 'cval', Math.abs(con.v), con.t === 'angle' ? '°' : 'mm') : ''}<button class="btn soft wide danger" data-act="del-constraint">${icon('trash', 15)} Apagar restrição</button></div>` : ''}
       ${ent ? `<div class="pe-params"><div class="panel-title">Medidas</div>${this.entityForm(ent)}<label class="pe-check"><input type="checkbox" data-k="construction" ${ent.construction ? 'checked' : ''}/> Linha de construção (não vira sólido)</label><button class="btn soft wide danger" data-act="del-entity">${icon('trash', 15)} Apagar</button></div>` : ''}
       ${openEnds.length ? `<div class="hint warn-t">${icon('warning', 14)} Há linhas que não fecham um contorno. Só contornos fechados viram sólido.</div>` : ''}
@@ -882,6 +919,16 @@ class PartEditor {
         return `<div class="pe-row">${this.numField('Lados', 'n', e.n, '')}${this.numField('Raio', 'r', e.r)}</div>${xy('Centro', 'c', e.c)}`;
       case 'arc':
         return `${this.numField('Diâmetro', 'd', (circleThrough(e.a, e.m, e.b)?.r ?? 0) * 2)}${xy('Início', 'a', e.a)}${xy('Fim', 'b', e.b)}`;
+      case 'ellipse':
+        return `<div class="pe-row">${this.numField('Largura', 'ew', e.rx * 2)}${this.numField('Altura', 'eh', e.ry * 2)}</div>${this.numField('Giro', 'rot', e.rot, '°')}${xy('Centro', 'c', e.c)}`;
+      case 'spline':
+        return `<div class="hint" style="margin:0">${e.pts.length} pontos. Arraste os pontos para mudar a curva.</div>${xy('Início', 'a', e.pts[0])}${xy('Fim', 'b', e.pts[e.pts.length - 1])}`;
+      case 'text': {
+        const fonts = listFaces();
+        return `<label class="pe-field"><span>Texto</span><span class="field"><input data-k="text" value="${esc(e.text)}" spellcheck="false"/></span></label>
+          <label class="pe-field"><span>Fonte</span><select data-k="font">${fonts.map((f) => `<option value="${esc(f.id)}" ${f.id === e.font ? 'selected' : ''}>${esc(f.family)} ${esc(f.style)}</option>`).join('')}</select></label>
+          <div class="pe-row">${this.numField('Tamanho', 'size', e.size)}${this.numField('Giro', 'rot', e.rot, '°')}</div>${xy('Centro', 'c', e.c)}`;
+      }
     }
   }
 
@@ -936,6 +983,15 @@ class PartEditor {
           return this.deleteEntity();
         case 'del-constraint':
           return this.deleteConstraint();
+        case 'auto-constrain':
+          return void this.autoConstrain();
+        case 'import-dxf':
+          return this.importDxf();
+        case 'bg-image':
+          return this.pickImage();
+        case 'bg-remove':
+          delete this.sketchFeature!.image;
+          return this.changed();
       }
       return;
     }
@@ -966,6 +1022,19 @@ class PartEditor {
     if (this.sketchId) {
       if (k === 'grid') this.gridStep = Number(val);
       else if (k === 'sides') this.polygonSides = Math.max(3, Math.min(64, Math.round(num(String(val))) || 6));
+      else if (k === 'modsize') {
+        const n = num(String(val));
+        if (Number.isFinite(n) && (n > 0 || (this.tool === 'offset' && n !== 0))) this.modSize = n;
+      } else if (k.startsWith('img.')) {
+        const img = this.sketchFeature!.image;
+        const n = num(String(val));
+        if (!img || !Number.isFinite(n)) return this.renderSide();
+        if (k === 'img.w' && n > 0) img.w = n;
+        else if (k === 'img.opacity') img.opacity = Math.max(0.05, Math.min(1, n / 100));
+        else if (k === 'img.c.0') img.c[0] = n;
+        else if (k === 'img.c.1') img.c[1] = n;
+        return this.changed();
+      }
       else if (k === 'cval') return void this.editConstraintValue(num(String(val)));
       else return void this.editEntity(k, val);
       return this.renderSide();
@@ -1012,6 +1081,11 @@ class PartEditor {
       e.construction = !!val || undefined;
       return this.changed();
     }
+    if (e.t === 'text' && (k === 'text' || k === 'font' || k === 'size')) {
+      const patch = k === 'size' ? { size: num(String(val)) } : { [k]: String(val) };
+      if (k === 'size' && !(patch.size! > 0)) return this.renderSide();
+      return void this.setText(e, patch);
+    }
     const n = num(String(val));
     if (!Number.isFinite(n)) return this.renderSide();
     const [key, axis] = k.split('.');
@@ -1033,7 +1107,78 @@ class PartEditor {
     if (e.t === 'rect' && (k === 'w' || k === 'h')) e[k] = Math.max(0.01, n);
     else if (e.t === 'polygon' && k === 'r') e.r = Math.max(0.01, n);
     else if (e.t === 'polygon' && k === 'n') e.n = Math.max(3, Math.min(64, Math.round(n)));
+    else if (e.t === 'ellipse' && (k === 'ew' || k === 'eh')) e[k === 'ew' ? 'rx' : 'ry'] = Math.max(0.005, n / 2);
+    else if ((e.t === 'ellipse' || e.t === 'text') && k === 'rot') e.rot = n;
     await this.resolve(before);
+  }
+
+  /** Change a text entity and lay its outline out again with the font. */
+  private async setText(e: Extract<SketchEntity, { t: 'text' }>, patch: Partial<{ text: string; font: string; size: number }>) {
+    const next = { text: e.text, font: e.font, size: e.size, ...patch };
+    try {
+      e.outline = await textOutline(next.text, next.font, next.size);
+      Object.assign(e, next);
+    } catch {
+      toast('Não consegui ler essa fonte.', 'error');
+    }
+    this.changed();
+  }
+
+  private async autoConstrain() {
+    const s = this.sketchFeature!;
+    const before = snapshot(s);
+    const n = autoConstrain(s);
+    if (!n) return toast('Nada para restringir automaticamente.');
+    if (await this.resolve(before)) toast(`${n} ${n === 1 ? 'restrição adicionada' : 'restrições adicionadas'}.`);
+  }
+
+  private importDxf() {
+    const input = el<HTMLInputElement>('<input type="file" accept=".dxf,.DXF" hidden />');
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file || !this.sketchId) return;
+      try {
+        const { ents, skipped } = parseDxf(await file.text());
+        if (!ents.length) return toast('O DXF não tem linhas, arcos ou curvas que eu consiga ler.', 'error', 4000);
+        const s = this.sketchFeature!;
+        s.entities.push(...ents);
+        const before = snapshot(s);
+        autoConstrain(s);
+        // The drawing comes in as it is; constraints are a bonus.
+        if (!(await this.resolve(before, true))) await this.resolve();
+        toast(`${ents.length} elementos importados${skipped ? ` (${skipped} ignorados: texto, cotas, blocos…)` : ''}.`, 'info', 4000);
+      } catch (err) {
+        toast(`Não consegui ler o DXF: ${(err as Error).message}`, 'error', 5000);
+      }
+    });
+    document.body.appendChild(input);
+    input.click();
+  }
+
+  /** Picture to trace over, shrunk so it does not bloat the project. */
+  private pickImage() {
+    const input = el<HTMLInputElement>('<input type="file" accept="image/png,image/jpeg,image/webp" hidden />');
+    input.addEventListener('change', async () => {
+      const file = input.files?.[0];
+      input.remove();
+      const s = this.sketchFeature;
+      if (!file || !s) return;
+      try {
+        const bmp = await createImageBitmap(file);
+        const k = Math.min(1, 1600 / Math.max(bmp.width, bmp.height));
+        const c = document.createElement('canvas');
+        c.width = Math.round(bmp.width * k);
+        c.height = Math.round(bmp.height * k);
+        c.getContext('2d')!.drawImage(bmp, 0, 0, c.width, c.height);
+        s.image = { src: c.toDataURL('image/jpeg', 0.85), c: [0, 0], w: 100, aspect: bmp.height / bmp.width, opacity: 0.5 };
+        this.changed();
+      } catch {
+        toast('Não consegui abrir essa imagem.', 'error');
+      }
+    });
+    document.body.appendChild(input);
+    input.click();
   }
 
   // ---------- constraints ----------
@@ -1169,7 +1314,7 @@ class PartEditor {
     if (this.picks.some((p) => JSON.stringify(p) === JSON.stringify(pick))) return;
     this.picks.push(pick);
     if (this.picks.length < tool.need.length) return this.drawSketch();
-    const [A, B] = this.picks as [Pick, Pick | undefined];
+    const [A, B, C] = this.picks as [Pick, Pick | undefined, Pick | undefined];
     this.picks = [];
     const id = fid();
     const P = (x: Pick | undefined) => (x && 'ref' in x ? x.ref : 'origin');
@@ -1181,6 +1326,9 @@ class PartEditor {
         break;
       case 'fix':
         c = { id, t: 'fix', p: P(A), at: [...refPoint(s.entities, P(A))!] };
+        break;
+      case 'symmetric':
+        c = { id, t: 'symmetric', p1: P(A), p2: P(B), e: E(C) };
         break;
       case 'horizontal':
       case 'vertical':
@@ -1424,11 +1572,12 @@ class PartEditor {
   private pointRefs(): { ref: PointRef | null; p: V2 }[] {
     const out: { ref: PointRef | null; p: V2 }[] = [{ ref: 'origin', p: [0, 0] }];
     for (const e of this.sketchFeature?.entities ?? []) {
-      if (e.t === 'line' || e.t === 'arc') out.push({ ref: { e: e.id, p: 'a' }, p: e.a }, { ref: { e: e.id, p: 'b' }, p: e.b });
+      const ends = curveEnds(e);
+      if (ends) out.push({ ref: { e: e.id, p: 'a' }, p: ends[0] }, { ref: { e: e.id, p: 'b' }, p: ends[1] });
       if (e.t === 'arc') {
         const c = circleThrough(e.a, e.m, e.b);
         if (c) out.push({ ref: { e: e.id, p: 'c' }, p: c.c });
-      } else if (e.t !== 'line') out.push({ ref: { e: e.id, p: 'c' }, p: e.c });
+      } else if ('c' in e) out.push({ ref: { e: e.id, p: 'c' }, p: e.c });
       if (e.t === 'rect') {
         const [x, y] = e.c, w = e.w / 2, h = e.h / 2;
         for (const p of [[x - w, y - h], [x + w, y - h], [x + w, y + h], [x - w, y + h]] as V2[]) out.push({ ref: null, p });
@@ -1485,6 +1634,13 @@ class PartEditor {
     }
     if (!this.sketchId) return;
     const canvas = this.renderer.domElement;
+    if (this.splineDrag) {
+      const p = this.planePoint(e);
+      const sp = this.sketchFeature!.entities.find((x) => x.id === this.splineDrag!.e);
+      if (p && sp?.t === 'spline') sp.pts[this.splineDrag.i] = this.gridSnap(p);
+      this.drawSketch();
+      return;
+    }
     if (this.drag) {
       const p = this.planePoint(e);
       if (p) this.dragTo(this.gridSnap(p));
@@ -1497,6 +1653,10 @@ class PartEditor {
     }
     canvas.style.cursor = '';
     if (isCon(this.tool)) return;
+    if (isMod(this.tool)) {
+      canvas.style.cursor = 'crosshair';
+      return;
+    }
     const p = this.planePoint(e);
     this.hover = p ? this.snap(p, e).p : null;
     this.drawSketch();
@@ -1519,6 +1679,10 @@ class PartEditor {
   }
 
   private async endDrag() {
+    if (this.splineDrag) {
+      this.splineDrag = null;
+      return this.changed();
+    }
     const d = this.drag;
     if (!d) return;
     this.drag = null;
@@ -1533,8 +1697,13 @@ class PartEditor {
     if (!this.sketchId || e.button !== 0) return;
     if (this.tool === 'select') {
       const near = this.nearPoint(e, 9);
+      const inner = near?.ref ? null : this.splinePointNear(e);
       this.selConstraint = null;
-      if (near?.ref && near.ref !== 'origin') {
+      if (inner) {
+        this.splineDrag = inner;
+        this.selEntity = inner.e;
+        this.renderer.domElement.setPointerCapture?.(e.pointerId);
+      } else if (near?.ref && near.ref !== 'origin') {
         this.drag = { ref: near.ref, to: near.p, busy: null };
         this.selEntity = near.ref.e;
         this.renderer.domElement.setPointerCapture?.(e.pointerId);
@@ -1545,6 +1714,7 @@ class PartEditor {
       return;
     }
     if (isCon(this.tool)) return this.constraintClick(e);
+    if (isMod(this.tool)) return void this.modClick(e);
     const raw = this.planePoint(e);
     if (!raw) return;
     const { p, ref } = this.snap(raw, e);
@@ -1602,7 +1772,103 @@ class PartEditor {
         void this.addEntities([arc], [...this.joinTo({ e: arc.id, p: 'a' }, refs[0]), ...this.joinTo({ e: arc.id, p: 'b' }, refs[1])]);
         return;
       }
+      case 'ellipse': {
+        if (this.pts.length < 3) return this.drawSketch();
+        const [c, major, h] = this.pts;
+        reset();
+        const rx = r2(Math.hypot(major[0] - c[0], major[1] - c[1])), ry = ellipseMinor(c, major, h);
+        if (rx < 1e-3 || ry < 1e-3) return;
+        const el: SketchEntity = { id: fid(), t: 'ellipse', c, rx, ry, rot: r2((Math.atan2(major[1] - c[1], major[0] - c[0]) * 180) / Math.PI) };
+        void this.addEntities([el], this.joinTo({ e: el.id, p: 'c' }, refs[0]));
+        return;
+      }
+      case 'spline': {
+        const n = this.pts.length;
+        // Clicking the first point again closes the curve; the same point twice finishes it.
+        if (n > 2 && same(p, this.pts[0])) return void this.finishSpline(true);
+        if (n > 1 && same(p, this.pts[n - 2])) {
+          this.pts.pop();
+          this.ptRefs.pop();
+          return void this.finishSpline(false);
+        }
+        return this.drawSketch();
+      }
+      case 'slot': {
+        if (this.pts.length < 3) return this.drawSketch();
+        const [a, b, h] = this.pts;
+        reset();
+        const sl = slot(a, b, slotRadius(a, b, h));
+        if (sl) void this.addEntities(sl.ents, sl.cons);
+        return;
+      }
+      case 'text': {
+        reset();
+        const font = DEFAULT_FONT_ID;
+        void textOutline('Texto', font, 10).then((outline) => {
+          const t: SketchEntity = { id: fid(), t: 'text', c: p, text: 'Texto', size: 10, font, rot: 0, outline };
+          this.tool = 'select';
+          this.selEntity = t.id;
+          return this.addEntities([t], this.joinTo({ e: t.id, p: 'c' }, refs[0]));
+        }).then(() => {
+          const inp = this.side.querySelector<HTMLInputElement>('[data-k=text]');
+          inp?.focus();
+          inp?.select();
+        }).catch(() => toast('Não consegui carregar a fonte.', 'error'));
+        return;
+      }
     }
+  }
+
+  /** End the spline being drawn (closed: back to its first point). */
+  private async finishSpline(closed: boolean) {
+    const pts = [...this.pts];
+    const refs = [...this.ptRefs];
+    this.pts = [];
+    this.ptRefs = [];
+    if (closed) pts[pts.length - 1] = [...pts[0]];
+    if (pts.length < 2) return this.drawSketch();
+    const sp: SketchEntity = { id: fid(), t: 'spline', pts };
+    const cons = closed ? [] : [...this.joinTo({ e: sp.id, p: 'a' }, refs[0]), ...this.joinTo({ e: sp.id, p: 'b' }, refs[pts.length - 1])];
+    await this.addEntities([sp], cons);
+  }
+
+  /** Inner point of a spline under the mouse (its ends are ordinary solver points). */
+  private splinePointNear(e: PointerEvent): { e: string; i: number } | null {
+    const [mx, my] = this.mouse(e);
+    for (const ent of this.sketchFeature?.entities ?? []) {
+      if (ent.t !== 'spline') continue;
+      for (let i = 1; i < ent.pts.length - 1; i++) {
+        const [sx, sy] = this.toScreen(ent.pts[i]);
+        if (Math.hypot(sx - mx, sy - my) < 9) return { e: ent.id, i };
+      }
+    }
+    return null;
+  }
+
+  /** Trim, extend, offset and corner tools. */
+  private async modClick(e: PointerEvent) {
+    const s = this.sketchFeature!;
+    const raw = this.planePoint(e);
+    if (!raw) return;
+    const before = snapshot(s);
+    if (this.tool === 'sfillet' || this.tool === 'schamfer') {
+      const at = this.nearPoint(e, 14)?.p ?? raw;
+      const err = corner(s, at, this.modSize, this.tool === 'sfillet' ? 'fillet' : 'chamfer');
+      if (err) return toast(err);
+      return void this.resolve(before);
+    }
+    const id = this.pick(e);
+    if (!id) return;
+    if (this.tool === 'offset') {
+      const r = offset(s, id, this.modSize);
+      if (typeof r === 'string') return toast(r);
+      return void this.addEntities(r.ents, r.cons);
+    }
+    const r = this.tool === 'trim' ? trim(s, id, raw) : extend(s, id, raw);
+    if (r === 'unsupported') return toast(this.tool === 'trim' ? 'Aparar funciona em linhas, arcos e círculos.' : 'Estender funciona em linhas.');
+    if (!r) return toast(this.tool === 'trim' ? 'Essa linha não cruza nenhuma outra. Para tirar tudo, selecione e aperte Delete.' : 'A linha não encontra nada nessa direção.');
+    if (this.selEntity && !s.entities.some((x) => x.id === this.selEntity)) this.selEntity = null;
+    void this.resolve(before);
   }
 
   /** Clicking a constraint symbol or dimension selects it. */
@@ -1626,13 +1892,14 @@ class PartEditor {
     const mx = e.clientX - r.left, my = e.clientY - r.top;
     let best: string | null = null;
     let bd = 8;
-    for (const ent of this.sketchFeature!.entities) {
-      const pts = entityPoints(ent).map((p) => this.toScreen(p));
-      for (let i = 1; i < pts.length; i++) {
-        const d = segDist(mx, my, pts[i - 1], pts[i]);
-        if (d < bd) (bd = d), (best = ent.id);
+    for (const ent of this.sketchFeature!.entities)
+      for (const line of entityLines(ent)) {
+        const pts = line.map((p) => this.toScreen(p));
+        for (let i = 1; i < pts.length; i++) {
+          const d = segDist(mx, my, pts[i - 1], pts[i]);
+          if (d < bd) (bd = d), (best = ent.id);
+        }
       }
-    }
     return best;
   }
 
@@ -1649,6 +1916,7 @@ class PartEditor {
       if (k === 'escape') this.measuring ? this.toggleMeasure() : this.select(null);
       return;
     }
+    if ((k === 'escape' || k === 'enter') && this.tool === 'spline' && this.pts.length >= 2) return void this.finishSpline(false);
     if (k === 'escape') {
       if (this.pts.length || this.chainStart || this.picks.length) {
         this.pts = [];
@@ -1667,7 +1935,7 @@ class PartEditor {
       if (this.selConstraint) return e.preventDefault(), this.deleteConstraint();
       if (this.selEntity) return e.preventDefault(), this.deleteEntity();
     }
-    const t = [...TOOLS, ...CTOOLS].find((x) => x.key?.toLowerCase() === k);
+    const t = [...TOOLS, ...MTOOLS, ...CTOOLS].find((x) => x.key?.toLowerCase() === k);
     if (t && !e.ctrlKey && !e.metaKey) this.setTool(t.id);
   }
 
@@ -1697,6 +1965,21 @@ class PartEditor {
     // Sketch axes, lifted off the grid so they are not hidden by it.
     this.sketch.add(lines([-100, 0, 0.005, 100, 0, 0.005], new THREE.LineBasicMaterial({ color: 0xef5a5f })));
     this.sketch.add(lines([0, -100, 0.005, 0, 100, 0.005], new THREE.LineBasicMaterial({ color: 0x2fb36b })));
+    if (s.image) {
+      const img = s.image;
+      if (this.imageTex?.src !== img.src) {
+        this.imageTex?.tex.dispose();
+        const tex = new THREE.TextureLoader().load(img.src);
+        tex.colorSpace = THREE.SRGBColorSpace;
+        this.imageTex = { src: img.src, tex };
+      }
+      const m = new THREE.Mesh(
+        new THREE.PlaneGeometry(img.w, img.w * img.aspect),
+        new THREE.MeshBasicMaterial({ map: this.imageTex.tex, transparent: true, opacity: img.opacity, depthWrite: false, side: THREE.DoubleSide }),
+      );
+      m.position.set(img.c[0], img.c[1], -0.02);
+      this.sketch.add(m);
+    }
 
     // Closed outlines filled so it is clear what becomes solid.
     for (const prof of sketchProfiles(s.entities).profiles) {
@@ -1715,9 +1998,11 @@ class PartEditor {
       const mat = ent.construction
         ? new THREE.LineDashedMaterial({ color: on ? accent : ink, dashSize: 2, gapSize: 1.5, transparent: true, opacity: 0.6 })
         : new THREE.LineBasicMaterial({ color: on ? accent : ink });
-      const l = polyline(entityPoints(ent), mat);
-      if (ent.construction) l.computeLineDistances();
-      this.sketch.add(l);
+      for (const pts of entityLines(ent)) {
+        const l = polyline(pts, mat);
+        if (ent.construction) l.computeLineDistances();
+        this.sketch.add(l);
+      }
       // Lines are one pixel wide: mark the selected one's points too.
       if (on) for (const p of this.entityHandles(ent)) this.sketch.add(this.dot(p, accent));
     }
@@ -1775,7 +2060,7 @@ class PartEditor {
           const f = lineFrame(e);
           return [f.mid[0] + f.d[0] * k * 18 + f.n[0] * 14, f.mid[1] + f.d[1] * k * 18 + f.n[1] * 14];
         }
-        const at: V2 = e.t === 'arc' ? e.m : e.t === 'circle' ? [e.c[0] + e.r * Math.SQRT1_2, e.c[1] - e.r * Math.SQRT1_2] : e.c;
+        const at: V2 = e.t === 'arc' ? e.m : e.t === 'circle' ? [e.c[0] + e.r * Math.SQRT1_2, e.c[1] - e.r * Math.SQRT1_2] : e.t === 'spline' ? e.pts[e.pts.length >> 1] : e.c;
         const p = this.toScreen(at);
         return [p[0] + 12 + k * 18, p[1] + 12];
       };
@@ -1793,6 +2078,10 @@ class PartEditor {
       switch (c.t) {
         case 'coincident':
           add(c, GLYPH.coincident!, atPoint(c.p1), 'pt');
+          break;
+        case 'symmetric':
+          add(c, GLYPH.symmetric!, atPoint(c.p1));
+          add(c, GLYPH.symmetric!, atPoint(c.p2));
           break;
         case 'horizontal':
         case 'vertical':
@@ -1861,7 +2150,8 @@ class PartEditor {
   private entityHandles(e: SketchEntity): V2[] {
     if (e.t === 'line') return [e.a, e.b];
     if (e.t === 'arc') return [e.a, e.m, e.b];
-    return [e.c];
+    if (e.t === 'spline') return e.pts;
+    return 'c' in e ? [e.c] : [];
   }
 
   private ghost(): V2[] | null {
@@ -1880,6 +2170,24 @@ class PartEditor {
         if (!a) return null;
         if (!b) return [a, h];
         return arcPoints(a, h, b, 32);
+      case 'ellipse': {
+        if (!a) return null;
+        const major = b ?? h;
+        const rx = Math.hypot(major[0] - a[0], major[1] - a[1]);
+        const rot = (Math.atan2(major[1] - a[1], major[0] - a[0]) * 180) / Math.PI;
+        if (!b) return [a, h];
+        const ry = ellipseMinor(a, b, h);
+        const pts = ellipsePoints({ c: a, rx, ry: Math.max(ry, 0.01), rot }, 72);
+        return [...pts, pts[0]];
+      }
+      case 'spline':
+        return this.pts.length ? splinePoints([...this.pts, h], 12) : null;
+      case 'slot': {
+        if (!a) return null;
+        if (!b) return [a, h];
+        const sl = slot(a, b, slotRadius(a, b, h));
+        return sl ? sl.ents.flatMap((e) => entityPoints(e)) : [a, b];
+      }
     }
     return null;
   }
@@ -1932,7 +2240,36 @@ function entityPoints(e: SketchEntity): V2[] {
         const a = Math.PI / 2 + (i * 2 * Math.PI) / e.n;
         return [e.c[0] + e.r * Math.cos(a), e.c[1] + e.r * Math.sin(a)] as V2;
       });
+    case 'ellipse': {
+      const pts = ellipsePoints(e, 72);
+      return [...pts, pts[0]];
+    }
+    case 'spline':
+      return e.pts.length >= 2 ? splinePoints(e.pts, 16) : e.pts;
+    case 'text':
+      return entityLines(e)[0] ?? [e.c];
   }
+}
+
+/** Distance from p to the line through a and b. */
+function lineDist(a: V2, b: V2, p: V2) {
+  const d = [b[0] - a[0], b[1] - a[1]];
+  const l = Math.hypot(d[0], d[1]) || 1;
+  return Math.abs((p[0] - a[0]) * d[1] - (p[1] - a[1]) * d[0]) / l;
+}
+const ellipseMinor = (c: V2, major: V2, p: V2) => r2(lineDist(c, major, p));
+const slotRadius = (a: V2, b: V2, p: V2) => r2(lineDist(a, b, p));
+
+/** Every drawn outline of an entity (text has many). */
+function entityLines(e: SketchEntity): V2[][] {
+  if (e.t === 'text') return textContours(e).map((c) => [...c, c[0]]);
+  return [entityPoints(e)];
+}
+
+async function textOutline(text: string, font: string, size: number): Promise<V2[][]> {
+  const f = await loadFont(font || DEFAULT_FONT_ID);
+  const r = (v: number) => Math.round(v * 1000) / 1000;
+  return textToPolygons(f, { text: text || ' ', size, letterSpacing: 0, lineHeight: 1.2, align: 'center' }).map((c) => c.map(([x, y]) => [r(x), r(y)] as V2));
 }
 
 function polyline(pts: V2[], mat: THREE.Material) {

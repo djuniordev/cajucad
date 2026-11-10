@@ -115,4 +115,24 @@ const near = (a, b) => Math.abs(a - b) < 1e-3;
   const l = s.entities[0];
   check('sem restrições', res.ok && near(l.a[0], 1) && near(l.b[1], 3) && res.dof === 4, `dof ${res.dof}`);
 }
+// Slot drawn by the tool: 5 free degrees (two centres and the width), nothing redundant.
+{
+  const ops = path.join(root, 'node_modules', '.cache', 'sketch-ops-s.mjs');
+  await build({ input: path.join(root, 'src/part/sketchOps.ts'), platform: 'node', output: { file: ops, format: 'esm' }, logLevel: 'silent' });
+  const { slot, corner } = await import(`file:///${ops.replace(/\\/g, '/')}`);
+  const sl = slot([0, 0], [20, 0], 4);
+  const s = { id: 's', type: 'sketch', name: 's', plane: 'XY', offset: 0, entities: sl.ents, constraints: sl.cons };
+  const res = await solveSketch(s);
+  check('rasgo com 5 graus livres', res.ok && res.dof === 5, `dof ${res.dof}`);
+  // Rounded corner on a constrained rectangle stays solvable.
+  const pts = [[0, 0], [30, 0], [30, 20], [0, 20]];
+  const ls = pts.map((p, i) => ({ id: `l${i}`, t: 'line', a: p, b: pts[(i + 1) % 4] }));
+  const cons = ls.map((l, i) => ({ id: `c${i}`, t: 'coincident', p1: { e: l.id, p: 'b' }, p2: { e: ls[(i + 1) % 4].id, p: 'a' } }));
+  cons.push(...ls.map((l, i) => ({ id: `hv${i}`, t: i % 2 ? 'vertical' : 'horizontal', e: l.id })));
+  const r2 = { id: 's', type: 'sketch', name: 's', plane: 'XY', offset: 0, entities: ls, constraints: cons };
+  await solveSketch(r2);
+  const err = corner(r2, [30, 20], 5, 'fillet');
+  const res2 = await solveSketch(r2);
+  check('filete de canto num retângulo restrito', !err && res2.ok, `dof ${res2.dof}`);
+}
 process.exit(failed ? 1 : 0);

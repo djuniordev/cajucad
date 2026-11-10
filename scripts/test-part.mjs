@@ -83,6 +83,31 @@ const cases = {
     sk('s1', 'XY', [{ id: 'p', t: 'polygon', c: [0, 0], r: 10, n: 6 }], 5),
     { id: 'e1', type: 'extrude', name: 'e1', sketch: 's1', distance: 5, symmetric: false, reverse: true, op: 'join' },
   ],
+  'elipse 20x10 girada 30° (vol ≈ 1571)': [
+    sk('s1', 'XY', [{ id: 'e', t: 'ellipse', c: [5, 0], rx: 10, ry: 5, rot: 30 }]),
+    { id: 'e1', type: 'extrude', name: 'e1', sketch: 's1', distance: 10, symmetric: false, reverse: false, op: 'join' },
+  ],
+  'elipse em pé (ry > rx)': [
+    sk('s1', 'XY', [{ id: 'e', t: 'ellipse', c: [0, 0], rx: 4, ry: 12, rot: 0 }]),
+    { id: 'e1', type: 'extrude', name: 'e1', sketch: 's1', distance: 2, symmetric: false, reverse: false, op: 'join' },
+  ],
+  'spline fechada': [
+    sk('s1', 'XY', [{ id: 's', t: 'spline', pts: [[0, 0], [20, -5], [25, 15], [5, 20], [0, 0]] }]),
+    { id: 'e1', type: 'extrude', name: 'e1', sketch: 's1', distance: 4, symmetric: false, reverse: false, op: 'join' },
+  ],
+  'spline + linha fechando': [
+    sk('s1', 'XY', [{ id: 's', t: 'spline', pts: [[0, 0], [10, 8], [20, 0]] }, { id: 'l', t: 'line', a: [20, 0], b: [0, 0] }]),
+    { id: 'e1', type: 'extrude', name: 'e1', sketch: 's1', distance: 3, symmetric: false, reverse: false, op: 'join' },
+  ],
+  'texto (contorno com miolo vazado, vol 10·(400-100) = 3000)': [
+    sk('s1', 'XY', [{ id: 't', t: 'text', c: [30, 0], text: 'O', size: 20, font: '', rot: 0, outline: [[[-10, -10], [10, -10], [10, 10], [-10, 10]], [[-5, -5], [5, -5], [5, 5], [-5, 5]]] }]),
+    { id: 'e1', type: 'extrude', name: 'e1', sketch: 's1', distance: 10, symmetric: false, reverse: false, op: 'join' },
+  ],
+  'varredura ao longo de spline': [
+    sk('path', 'XZ', [{ id: 's', t: 'spline', pts: [[0, 0], [5, 15], [0, 30]] }]),
+    sk('prof', 'XY', [{ id: 'c', t: 'circle', c: [0, 0], r: 2 }]),
+    { id: 'sw', type: 'sweep', name: 'sw', sketch: 'prof', path: 'path', op: 'join' },
+  ],
   'erro esperado: esboço aberto': [
     sk('s1', 'XY', [{ id: 'l1', t: 'line', a: [0, 0], b: [10, 0] }]),
     { id: 'e1', type: 'extrude', name: 'e1', sketch: 's1', distance: 5, symmetric: false, reverse: false, op: 'join' },

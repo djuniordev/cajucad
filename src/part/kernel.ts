@@ -11,6 +11,9 @@ import {
   profilePoints,
   sketchPath,
   sketchProfiles,
+  splineBeziers,
+  type Seg,
+  type V2,
   type Axis3,
   type BodyOp,
   type HoleFeature,
@@ -69,17 +72,29 @@ function planeFor(rc: Replicad, s: SketchFeature, shift = 0) {
   return new rc.Plane(scale(P.n, s.offset + shift), P.x, P.n);
 }
 
+/** Draw a chain of segments; a closed one ends with close() (which draws a last straight edge itself). */
+function drawSegs(rc: Replicad, start: V2, segs: Seg[], closed: boolean): Drawing {
+  const pen = rc.draw(start);
+  const list = [...segs];
+  if (closed && list.at(-1)?.t === 'line') list.pop();
+  let cur = start;
+  for (const s of list) {
+    if (s.t === 'line') pen.lineTo(s.to);
+    else if (s.t === 'arc') pen.threePointsArcTo(s.to, s.m);
+    else for (const [, c1, c2, to] of splineBeziers([cur, ...s.via, s.to])) pen.cubicBezierCurveTo(to, c1, c2);
+    cur = s.to;
+  }
+  return closed ? pen.close() : pen.done();
+}
+
 function profileDrawing(rc: Replicad, p: Profile): Drawing {
   if (p.kind === 'circle') return rc.drawCircle(p.r).translate(p.c[0], p.c[1]);
-  const pen = rc.draw(p.start);
-  const segs = [...p.segs];
-  // close() draws the final straight edge back to the start.
-  if (segs.at(-1)?.t === 'line') segs.pop();
-  for (const s of segs) {
-    if (s.t === 'line') pen.lineTo(s.to);
-    else pen.threePointsArcTo(s.to, s.m);
+  if (p.kind === 'ellipse') {
+    // drawEllipse wants the long radius first, along X.
+    const d = p.rx >= p.ry ? rc.drawEllipse(p.rx, p.ry) : rc.drawEllipse(p.ry, p.rx).rotate(90, [0, 0]);
+    return d.rotate(p.rot, [0, 0]).translate(p.c[0], p.c[1]);
   }
-  return pen.close();
+  return drawSegs(rc, p.start, p.segs, true);
 }
 
 /** One 2D region of a sketch: outlines inside an odd number of others become holes. */
@@ -133,16 +148,7 @@ function sweepSolid(rc: Replicad, f: SweepFeature, sketches: Map<string, SketchF
   if (!path) throw new Error(`“${p.name}” precisa ter um caminho só (linhas e arcos ligados, ou um círculo).`);
   let d: Drawing;
   if ('circle' in path) d = rc.drawCircle(path.circle.r).translate(path.circle.c[0], path.circle.c[1]);
-  else {
-    const pen = rc.draw(path.start);
-    const segs = [...path.segs];
-    if (path.closed && segs.at(-1)?.t === 'line') segs.pop();
-    for (const g of segs) {
-      if (g.t === 'line') pen.lineTo(g.to);
-      else pen.threePointsArcTo(g.to, g.m);
-    }
-    d = path.closed ? pen.close() : pen.done();
-  }
+  else d = drawSegs(rc, path.start, path.segs, path.closed);
   const spine = (d.sketchOnPlane(planeFor(rc, p)) as Sketch).wire;
   let out: Shape3D | null = null;
   for (const { wire, hole } of sketchWires(rc, s)) {
