@@ -71,6 +71,8 @@ grupos, furos, exportação e impressão Bambu continuam iguais.
 
 1. Esboço 2D (linha, arco, retângulo, círculo, polígono, medidas), extrudar e revolver, histórico
    editável. **Feito.**
-2. Restrições no esboço (planegcs), filete, chanfro, casca, furo, padrões.
-3. Varrer, loft, rosca, STEP, medir, vista em corte.
-4. Montagem simples.
+2. Restrições no esboço (planegcs), filete, chanfro, casca, furo, padrões. **Feito.**
+3. Varrer, loft, rosca, STEP, medir, vista em corte. **Feito.** (A rosca é cortada na malha com o
+   Manifold, porque o booleano do OpenCascade falha com hélices longas.)
+4. Montagem simples: encaixar uma face na outra, juntas rígida, giratória e deslizante, e
+   verificação de colisão, tudo na cena principal. **Feito.**
