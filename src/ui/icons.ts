@@ -65,6 +65,11 @@ const P: Record<string, string> = {
   polygon: '<path d="M12 3l8 5v8l-8 5-8-5V8z"/>',
   extrude: '<path d="M4 17l8 4 8-4-8-4z"/><path d="M12 13V3M9 6l3-3 3 3"/>',
   revolve: '<ellipse cx="12" cy="17" rx="8" ry="3"/><path d="M12 3v14"/><path d="M17 7a5 2 0 11-10 0"/>',
+  fillet: '<path d="M4 20V12a8 8 0 018-8h8"/><path d="M4 20h16V4" opacity=".45"/>',
+  chamfer: '<path d="M4 20V10l6-6h10"/><path d="M4 20h16V4" opacity=".45"/>',
+  shell: '<path d="M3 8l9-4 9 4v9l-9 4-9-4z"/><path d="M7 9.5l5-2 5 2v5.5l-5 2-5-2z"/>',
+  drill: '<ellipse cx="12" cy="7" rx="7" ry="3"/><path d="M5 7v10c0 1.7 3.1 3 7 3s7-1.3 7-3V7"/><ellipse cx="12" cy="7" rx="3" ry="1.2"/>',
+  pattern: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   part: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M8 10h8M8 14h5"/>',
 };
 

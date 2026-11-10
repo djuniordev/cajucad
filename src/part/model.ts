@@ -102,7 +102,74 @@ export interface RevolveFeature {
   op: BodyOp;
 }
 
-export type Feature = SketchFeature | ExtrudeFeature | RevolveFeature;
+/**
+ * Rounded (fillet) or bevelled (chamfer) edges. Edges are remembered by a point on them, so they
+ * are found again after the part before them changes; `all` takes every edge.
+ */
+export interface EdgeFeature {
+  id: string;
+  type: 'fillet' | 'chamfer';
+  name: string;
+  edges: V3[];
+  all: boolean;
+  /** Fillet radius or chamfer distance, mm. */
+  size: number;
+}
+
+/** Hollow the part, leaving the picked faces open. */
+export interface ShellFeature {
+  id: string;
+  type: 'shell';
+  name: string;
+  faces: V3[];
+  thickness: number;
+}
+
+export type HoleKind = 'simple' | 'counterbore' | 'countersink';
+
+/** Drilled hole: starts at `at` on a face and goes against the face normal `n`. */
+export interface HoleFeature {
+  id: string;
+  type: 'hole';
+  name: string;
+  at: V3 | null;
+  n: V3;
+  diameter: number;
+  depth: number;
+  through: boolean;
+  kind: HoleKind;
+  /** Counterbore: wider top diameter and its depth. Countersink: top diameter (90° cone). */
+  headDiameter: number;
+  headDepth: number;
+}
+
+export type Axis3 = 'x' | 'y' | 'z';
+
+/** Copies of earlier features (or of the whole part when `sources` is empty). */
+export interface PatternFeature {
+  id: string;
+  type: 'pattern';
+  name: string;
+  kind: 'linear' | 'circular' | 'mirror';
+  sources: string[];
+  axis: Axis3;
+  count: number;
+  /** Linear: distance between copies, mm. Circular: total angle, degrees. */
+  spacing: number;
+  angle: number;
+  /** Linear: optional second direction. */
+  axis2: Axis3 | null;
+  count2: number;
+  spacing2: number;
+  /** Mirror plane through the origin. */
+  plane: PlaneName;
+}
+
+export type SolidFeature = ExtrudeFeature | RevolveFeature;
+export type Feature = SketchFeature | SolidFeature | EdgeFeature | ShellFeature | HoleFeature | PatternFeature;
+
+/** Sketch a feature is built from, if any. */
+export const featureSketch = (f: Feature): string | null => (f.type === 'extrude' || f.type === 'revolve' ? f.sketch : null);
 
 export interface PartDef {
   version: 1;
@@ -136,7 +203,9 @@ export function parsePart(json: unknown): PartDef | null {
   }
 }
 
-export const featureLabel: Record<Feature['type'], string> = { sketch: 'Esboço', extrude: 'Extrusão', revolve: 'Revolução' };
+export const featureLabel: Record<Feature['type'], string> = {
+  sketch: 'Esboço', extrude: 'Extrusão', revolve: 'Revolução', fillet: 'Filete', chamfer: 'Chanfro', shell: 'Casca', hole: 'Furo', pattern: 'Padrão',
+};
 
 export function nextName(part: PartDef, type: Feature['type']) {
   const n = part.features.filter((f) => f.type === type).length + 1;

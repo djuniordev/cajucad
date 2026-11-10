@@ -21,7 +21,21 @@ rc.setOC(await opencascade({ wasmBinary: readFileSync(require.resolve('replicad-
 provideKernel(rc);
 
 const sk = (id, plane, entities, offset = 0) => ({ id, type: 'sketch', name: id, plane, offset, entities });
+const box = () => [
+  sk('b', 'XY', [{ id: 'r', t: 'rect', c: [0, 0], w: 40, h: 20 }]),
+  { id: 'eb', type: 'extrude', name: 'eb', sketch: 'b', distance: 10, symmetric: false, reverse: false, op: 'join' },
+];
+const hole = (id, at, extra = {}) => ({ id, type: 'hole', name: id, at, n: [0, 0, 1], diameter: 4, depth: 6, through: false, kind: 'simple', headDiameter: 8, headDepth: 2, ...extra });
+const pattern = (id, extra) => ({ id, type: 'pattern', name: id, kind: 'linear', sources: [], axis: 'x', count: 3, spacing: 10, angle: 360, axis2: null, count2: 1, spacing2: 10, plane: 'YZ', ...extra });
 const cases = {
+  'filete nas 4 arestas de cima (r 3)': [...box(), { id: 'f', type: 'fillet', name: 'f', edges: [[0, 10, 10], [0, -10, 10], [20, 0, 10], [-20, 0, 10]], all: false, size: 3 }],
+  'chanfro em todas (1)': [...box(), { id: 'c', type: 'chamfer', name: 'c', edges: [], all: true, size: 1 }],
+  'casca aberta em cima (2)': [...box(), { id: 's', type: 'shell', name: 's', faces: [[5, 5, 10]], thickness: 2 }],
+  'furo simples + rebaixo + escareado': [...box(), hole('h1', [-12, 0, 10]), hole('h2', [0, 0, 10], { kind: 'counterbore', through: true }), hole('h3', [12, 0, 10], { kind: 'countersink' })],
+  'padrão linear 3x2 de furos': [...box(), hole('h', [-15, -5, 10], { through: true }), pattern('p', { sources: ['h'], count: 3, spacing: 15, axis2: 'y', count2: 2, spacing2: 10 })],
+  'padrão circular do corpo (4)': [...box(), pattern('p', { kind: 'circular', axis: 'z', count: 4 })],
+  'espelho do corpo em YZ': [sk('b', 'XY', [{ id: 'r', t: 'rect', c: [15, 0], w: 10, h: 10 }]), { id: 'eb', type: 'extrude', name: 'eb', sketch: 'b', distance: 5, symmetric: false, reverse: false, op: 'join' }, pattern('p', { kind: 'mirror' })],
+  'erro esperado: aresta que não existe': [...box(), { id: 'f', type: 'fillet', name: 'f', edges: [[200, 200, 200]], all: false, size: 1 }],
   'retângulo com furo, extrudado': [
     sk('s1', 'XY', [{ id: 'r', t: 'rect', c: [0, 0], w: 40, h: 20 }, { id: 'c', t: 'circle', c: [0, 0], r: 5 }]),
     { id: 'e1', type: 'extrude', name: 'e1', sketch: 's1', distance: 10, symmetric: false, reverse: false, op: 'join' },
@@ -58,8 +72,8 @@ for (const [name, features] of Object.entries(cases)) {
     const v = p.filter((_, i) => i % 3 === a);
     return v.length ? `${Math.min(...v).toFixed(1)}..${Math.max(...v).toFixed(1)}` : '-';
   });
-  const vol = r.shape ? r.shape.volume ?? '' : '';
-  console.log(`${r.error && !name.startsWith('erro') ? 'FALHOU' : 'ok    '} ${name}: tris ${(r.mesh?.indices.length ?? 0) / 3}, x ${bb[0]} y ${bb[1]} z ${bb[2]}${r.error ? ` | erro: ${r.error.message}` : ''}`);
+  const vol = r.shape ? Math.round(rc.measureShapeVolumeProperties(r.shape).volume) : '';
+  console.log(`${r.error && !name.startsWith('erro') ? 'FALHOU' : 'ok    '} ${name}: tris ${(r.mesh?.indices.length ?? 0) / 3}, x ${bb[0]} y ${bb[1]} z ${bb[2]} vol ${vol}${r.error ? ` | erro: ${r.error.message}` : ''}`);
   if (name.startsWith('erro') ? !r.error : r.error || !r.mesh) failed++;
 }
 process.exit(failed ? 1 : 0);

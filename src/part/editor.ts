@@ -5,6 +5,9 @@
  */
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { LineMaterial } from 'three/examples/jsm/lines/LineMaterial.js';
+import { LineSegments2 } from 'three/examples/jsm/lines/LineSegments2.js';
+import { LineSegmentsGeometry } from 'three/examples/jsm/lines/LineSegmentsGeometry.js';
 import { el, esc, showMenu, toast } from '../ui/dom';
 import { icon } from '../ui/icons';
 import { buildPart, loadKernel, type PartMesh } from './kernel';
@@ -13,6 +16,7 @@ import {
   arcPoints,
   circleThrough,
   constraintEntities,
+  featureSketch,
   fid,
   isDimension,
   nextName,
@@ -21,8 +25,12 @@ import {
   sameRef,
   sketchProfiles,
   type BodyOp,
+  type EdgeFeature,
   type ExtrudeFeature,
   type Feature,
+  type HoleFeature,
+  type PatternFeature,
+  type ShellFeature,
   type PartDef,
   type PlaneName,
   type PointRef,
@@ -31,6 +39,7 @@ import {
   type SketchEntity,
   type SketchFeature,
   type V2,
+  type V3,
 } from './model';
 import { loadSolver, solveSketch } from './solver';
 import './part.css';
@@ -144,6 +153,11 @@ class PartEditor {
   private orbit: OrbitControls;
   private solid = new THREE.Group();
   private sketch = new THREE.Group();
+  private picksGroup = new THREE.Group();
+  /** Edges of the part before the selected fillet/chamfer, as line-segment pairs. */
+  private pickEdges: number[][] | null = null;
+  private solidFaces: PartMesh['faces'];
+  private hoverPick: ReturnType<PartEditor['pickAt']> = null;
   private anim: { t0: number; from: THREE.Vector3[]; to: THREE.Vector3[]; up: THREE.Vector3 } | null = null;
   private buildSeq = 0;
   private rebuildTimer = 0;
@@ -185,7 +199,7 @@ class PartEditor {
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8580, 2.2));
     const sun = new THREE.DirectionalLight(0xffffff, 1.6);
     sun.position.set(60, -80, 140);
-    this.scene.add(sun, this.solid, this.sketch, this.floorGrid(), new THREE.AxesHelper(20));
+    this.scene.add(sun, this.solid, this.sketch, this.picksGroup, this.floorGrid(), new THREE.AxesHelper(20));
     this.sketch.matrixAutoUpdate = false;
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(this.host);
@@ -288,19 +302,202 @@ class PartEditor {
     // While sketching, show the part as it was before this sketch.
     const idx = this.sketchId ? this.part.features.findIndex((f) => f.id === this.sketchId) : this.part.features.length;
     const part: PartDef = { version: 1, features: this.part.features.slice(0, idx) };
-    let r;
-    try {
-      r = await buildPart(part);
-    } catch (e) {
-      r = { mesh: null, error: { feature: '', message: (e as Error).message } };
-    }
+    const pf = this.pickFeature;
+    const safe = async (o?: Parameters<typeof buildPart>[1]) => {
+      try {
+        return await buildPart(part, o);
+      } catch (e) {
+        return { mesh: null, shape: null, edges: undefined, error: { feature: '', message: (e as Error).message } };
+      }
+    };
+    const r = await safe();
+    // Fillets, shells and holes are set up on the part as it was before them.
+    const view = pf ? await safe({ before: pf.id, edges: pf.type === 'fillet' || pf.type === 'chamfer' }) : r;
     if (seq !== this.buildSeq) return;
     this.errors.clear();
     if (r.error) this.errors.set(r.error.feature, r.error.message);
-    this.showSolid(r.mesh);
-    if (!this.sketchId) this.status.textContent = r.error ? `⚠ ${this.feature(r.error.feature)?.name ?? 'Erro'}: ${r.error.message}` : r.mesh ? 'Peça atualizada.' : 'Crie um esboço e depois extrude ou revolva.';
+    this.showSolid(view.mesh);
+    this.pickEdges = view.edges ?? null;
+    this.drawPicks();
+    if (!this.sketchId) {
+      const hint = !pf
+        ? ''
+        : pf.type === 'hole'
+          ? pf.at ? 'Clique noutra face para mudar o furo de lugar. Esc mostra o resultado.' : 'Clique na face onde vai o furo.'
+          : pf.type === 'shell'
+            ? 'Clique nas faces que ficam abertas. Esc mostra o resultado.'
+            : 'Clique nas arestas para pôr ou tirar. Esc mostra o resultado.';
+      this.status.textContent = r.error ? `⚠ ${this.feature(r.error.feature)?.name ?? 'Erro'}: ${r.error.message}` : hint || (r.mesh ? 'Peça atualizada.' : 'Crie um esboço e depois extrude ou revolva.');
+    }
     this.status.classList.toggle('warn', !!r.error);
     this.renderSide();
+  }
+
+  // ---------- picking edges and faces ----------
+
+  private screenOf(p: THREE.Vector3) {
+    const v = p.clone().project(this.camera);
+    const r = this.renderer.domElement.getBoundingClientRect();
+    return [((v.x + 1) / 2) * r.width, ((1 - v.y) / 2) * r.height, v.z];
+  }
+
+  /** What the mouse is over on the part: an edge for fillets/chamfers, a face otherwise. */
+  private pickAt(e: PointerEvent): { edge?: number; face?: number; point?: V3; normal?: V3 } | null {
+    const pf = this.pickFeature;
+    if (!pf) return null;
+    const [mx, my] = this.mouse(e);
+    if (pf.type === 'fillet' || pf.type === 'chamfer') {
+      if (pf.all || !this.pickEdges) return null;
+      let best = -1, bd = 8;
+      this.pickEdges.forEach((pts, i) => {
+        for (let k = 0; k + 5 < pts.length; k += 6) {
+          const a = this.screenOf(new THREE.Vector3(pts[k], pts[k + 1], pts[k + 2]));
+          const b = this.screenOf(new THREE.Vector3(pts[k + 3], pts[k + 4], pts[k + 5]));
+          if (a[2] > 1 || b[2] > 1) continue;
+          const d = segDist(mx, my, a, b);
+          if (d < bd) (bd = d), (best = i);
+        }
+      });
+      return best >= 0 ? { edge: best } : null;
+    }
+    const mesh = this.solid.children[0] as THREE.Mesh | undefined;
+    if (!mesh) return null;
+    const r = this.renderer.domElement.getBoundingClientRect();
+    const ray = new THREE.Raycaster();
+    ray.setFromCamera(new THREE.Vector2((mx / r.width) * 2 - 1, -(my / r.height) * 2 + 1), this.camera);
+    const hit = ray.intersectObject(mesh)[0];
+    if (!hit || hit.faceIndex == null || !hit.face) return null;
+    const groups = this.solidFaces ?? [];
+    const face = groups.findIndex((g) => hit.faceIndex! * 3 >= g.start && hit.faceIndex! * 3 < g.start + g.count);
+    const n = hit.face.normal;
+    return { face, point: [r2(hit.point.x), r2(hit.point.y), r2(hit.point.z)], normal: [n.x, n.y, n.z].map((v) => Math.round(v * 1e4) / 1e4) as V3 };
+  }
+
+  /** Index of the edge passing nearest to a remembered point. */
+  private edgeNear(p: V3) {
+    const P = new THREE.Vector3(...p);
+    const seg = new THREE.Line3();
+    const tmp = new THREE.Vector3();
+    let best = -1, bd = Infinity;
+    (this.pickEdges ?? []).forEach((pts, i) => {
+      for (let k = 0; k + 5 < pts.length; k += 6) {
+        seg.set(new THREE.Vector3(pts[k], pts[k + 1], pts[k + 2]), new THREE.Vector3(pts[k + 3], pts[k + 4], pts[k + 5]));
+        const d = seg.closestPointToPoint(P, true, tmp).distanceTo(P);
+        if (d < bd) (bd = d), (best = i);
+      }
+    });
+    return best;
+  }
+
+  /** Index of the solid face nearest to a remembered point. */
+  private faceNear(p: V3) {
+    const mesh = this.solid.children[0] as THREE.Mesh | undefined;
+    if (!mesh) return -1;
+    const pos = mesh.geometry.getAttribute('position');
+    const idx = mesh.geometry.getIndex()!;
+    const P = new THREE.Vector3(...p);
+    const tri = new THREE.Triangle();
+    const tmp = new THREE.Vector3();
+    let best = -1, bd = Infinity;
+    (this.solidFaces ?? []).forEach((g, i) => {
+      for (let k = g.start; k < g.start + g.count; k += 3) {
+        tri.setFromAttributeAndIndices(pos, idx.getX(k), idx.getX(k + 1), idx.getX(k + 2));
+        const d = tri.closestPointToPoint(P, tmp).distanceTo(P);
+        if (d < bd) (bd = d), (best = i);
+      }
+    });
+    return best;
+  }
+
+  private edgeMid(i: number): V3 {
+    const pts = this.pickEdges![i];
+    let total = 0;
+    for (let k = 0; k + 5 < pts.length; k += 6) total += Math.hypot(pts[k + 3] - pts[k], pts[k + 4] - pts[k + 1], pts[k + 5] - pts[k + 2]);
+    let walked = 0;
+    for (let k = 0; k + 5 < pts.length; k += 6) {
+      const l = Math.hypot(pts[k + 3] - pts[k], pts[k + 4] - pts[k + 1], pts[k + 5] - pts[k + 2]);
+      if (walked + l >= total / 2) {
+        const t = l ? (total / 2 - walked) / l : 0;
+        return [0, 1, 2].map((j) => r2(pts[k + j] + (pts[k + 3 + j] - pts[k + j]) * t)) as V3;
+      }
+      walked += l;
+    }
+    return [pts[0], pts[1], pts[2]];
+  }
+
+  private pickClick(e: PointerEvent) {
+    const pf = this.pickFeature!;
+    const hit = this.pickAt(e);
+    if (!hit) return;
+    if ((pf.type === 'fillet' || pf.type === 'chamfer') && hit.edge != null) {
+      const at = pf.edges.findIndex((p) => this.edgeNear(p) === hit.edge);
+      if (at >= 0) pf.edges.splice(at, 1);
+      else pf.edges.push(this.edgeMid(hit.edge));
+    } else if (pf.type === 'shell' && hit.point) {
+      const at = pf.faces.findIndex((p) => this.faceNear(p) === hit.face);
+      if (at >= 0) pf.faces.splice(at, 1);
+      else pf.faces.push(hit.point);
+    } else if (pf.type === 'hole' && hit.point && hit.normal) {
+      pf.at = hit.point;
+      pf.n = hit.normal;
+    }
+    this.hoverPick = null;
+    this.changed();
+  }
+
+  /** Chosen edges and faces (and what is under the mouse) drawn over the part. */
+  private drawPicks() {
+    for (const c of [...this.picksGroup.children]) {
+      this.picksGroup.remove(c);
+      (c as THREE.Mesh).geometry?.dispose();
+    }
+    const pf = this.pickFeature;
+    if (!pf) return;
+    // Blue, so choices stand out on the (accent-coloured) part.
+    const accent = new THREE.Color(0x2f8cff);
+    const r = this.renderer.domElement.getBoundingClientRect();
+    const thick = (pts: number[], color: THREE.Color | number, width: number, opacity = 1) => {
+      const g = new LineSegmentsGeometry().setPositions(pts);
+      const l = new LineSegments2(g, new LineMaterial({ color, linewidth: width, resolution: new THREE.Vector2(r.width, r.height), transparent: opacity < 1, opacity, depthTest: false }));
+      l.renderOrder = 6;
+      this.picksGroup.add(l);
+    };
+    const faceOverlay = (i: number, opacity: number) => {
+      const mesh = this.solid.children[0] as THREE.Mesh | undefined;
+      const g = this.solidFaces?.[i];
+      if (!mesh || !g) return;
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', mesh.geometry.getAttribute('position'));
+      geo.setIndex(Array.from((mesh.geometry.getIndex()!.array as ArrayLike<number>)).slice(g.start, g.start + g.count));
+      const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2, side: THREE.DoubleSide }));
+      this.picksGroup.add(m);
+    };
+    const hov = this.hoverPick;
+    if (pf.type === 'fillet' || pf.type === 'chamfer') {
+      if (pf.all || !this.pickEdges) return;
+      const chosen = new Set(pf.edges.map((p) => this.edgeNear(p)));
+      for (const i of chosen) if (i >= 0) thick(this.pickEdges[i], accent, 4);
+      if (hov?.edge != null && !chosen.has(hov.edge)) thick(this.pickEdges[hov.edge], accent, 3, 0.55);
+    } else if (pf.type === 'shell') {
+      const chosen = new Set(pf.faces.map((p) => this.faceNear(p)));
+      for (const i of chosen) faceOverlay(i, 0.55);
+      if (hov?.face != null && !chosen.has(hov.face)) faceOverlay(hov.face, 0.25);
+    } else if (pf.type === 'hole') {
+      if (hov?.face != null) faceOverlay(hov.face, 0.2);
+      if (pf.at) {
+        // Preview of the drill as a see-through cylinder going into the face.
+        const depth = pf.through ? 30 : pf.depth;
+        const cyl = new THREE.Mesh(
+          new THREE.CylinderGeometry(pf.diameter / 2, pf.diameter / 2, depth, 32),
+          new THREE.MeshBasicMaterial({ color: accent, transparent: true, opacity: 0.45, depthTest: false }),
+        );
+        const n = new THREE.Vector3(...pf.n).normalize();
+        cyl.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), n);
+        cyl.position.copy(new THREE.Vector3(...pf.at).addScaledVector(n, -depth / 2));
+        cyl.renderOrder = 6;
+        this.picksGroup.add(cyl);
+      }
+    }
   }
 
   private showSolid(mesh: PartMesh | null) {
@@ -308,6 +505,7 @@ class PartEditor {
       this.solid.remove(c);
       (c as THREE.Mesh).geometry?.dispose();
     }
+    this.solidFaces = mesh?.faces;
     if (!mesh) return;
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(mesh.positions, 3));
@@ -330,7 +528,7 @@ class PartEditor {
     const rows = fs
       .map((f) => {
         const err = this.errors.get(f.id);
-        const ic = f.type === 'sketch' ? 'sketch' : f.type;
+        const ic = f.type === 'hole' ? 'drill' : f.type;
         return `<div class="pe-feat ${f.id === this.selected ? 'on' : ''} ${err ? 'bad' : ''}" data-feat="${f.id}">
           ${icon(ic, 16)}<span class="nm">${esc(f.name)}</span>${err ? `<span class="err" data-tip="${esc(err)}">${icon('warning', 14)}</span>` : ''}
           ${f.type === 'sketch' ? `<button class="btn icon-only sm" data-act="edit-sketch" data-id="${f.id}" data-tip="Editar esboço">${icon('sketch', 15)}</button>` : ''}
@@ -339,13 +537,20 @@ class PartEditor {
       })
       .join('');
     const hasSketch = this.sketches().length > 0;
+    const hasSolid = fs.some((f) => f.type === 'extrude' || f.type === 'revolve');
+    const btn = (act: string, ic: string, label: string, on: boolean) => `<button class="btn soft" data-act="${act}" ${on ? '' : 'disabled'}>${icon(ic, 16)}<span>${label}</span></button>`;
     return `
       <div class="panel-title">Histórico</div>
       <div class="pe-feats">${rows || '<div class="hint">Ainda vazio.</div>'}</div>
       <div class="pe-actions">
-        <button class="btn soft" data-act="new-sketch">${icon('sketch', 16)}<span>Esboço</span></button>
-        <button class="btn soft" data-act="extrude" ${hasSketch ? '' : 'disabled'}>${icon('extrude', 16)}<span>Extrudar</span></button>
-        <button class="btn soft" data-act="revolve" ${hasSketch ? '' : 'disabled'}>${icon('revolve', 16)}<span>Revolver</span></button>
+        ${btn('new-sketch', 'sketch', 'Esboço', true)}
+        ${btn('extrude', 'extrude', 'Extrudar', hasSketch)}
+        ${btn('revolve', 'revolve', 'Revolver', hasSketch)}
+        ${btn('hole', 'drill', 'Furo', hasSolid)}
+        ${btn('fillet', 'fillet', 'Filete', hasSolid)}
+        ${btn('chamfer', 'chamfer', 'Chanfro', hasSolid)}
+        ${btn('shell', 'shell', 'Casca', hasSolid)}
+        ${btn('pattern', 'pattern', 'Padrão', hasSolid)}
       </div>
       ${sel ? `<div class="pe-params"><div class="panel-title">${esc(sel.name)}</div>${this.featureForm(sel)}</div>` : ''}`;
   }
@@ -381,11 +586,57 @@ class PartEditor {
         <label class="pe-check"><input type="checkbox" data-k="reverse" ${f.reverse ? 'checked' : ''} ${f.symmetric ? 'disabled' : ''}/> Inverter direção</label>
         <label class="pe-field"><span>Operação</span>${this.opSelect(f.op)}</label>`;
     }
-    return `
+    if (f.type === 'revolve')
+      return `
       <label class="pe-field"><span>Esboço</span>${this.sketchSelect(f.sketch)}</label>
       <label class="pe-field"><span>Eixo</span><select data-k="axis"><option value="y" ${f.axis === 'y' ? 'selected' : ''}>Vertical do esboço (Y)</option><option value="x" ${f.axis === 'x' ? 'selected' : ''}>Horizontal do esboço (X)</option></select></label>
       ${this.numField('Ângulo', 'angle', f.angle, '°')}
       <label class="pe-field"><span>Operação</span>${this.opSelect(f.op)}</label>`;
+    const sel = (k: string, cur: string, opts: [string, string][]) =>
+      `<select data-k="${k}">${opts.map(([v, l]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
+    const axes: [string, string][] = [['x', 'X'], ['y', 'Y'], ['z', 'Z (para cima)']];
+    if (f.type === 'fillet' || f.type === 'chamfer') {
+      const n = f.edges.length;
+      return `
+        ${this.numField(f.type === 'fillet' ? 'Raio' : 'Distância', 'size', f.size)}
+        <label class="pe-check"><input type="checkbox" data-k="all" ${f.all ? 'checked' : ''}/> Todas as arestas</label>
+        ${f.all ? '' : `<div class="hint">${n ? `${n} ${n === 1 ? 'aresta escolhida' : 'arestas escolhidas'}.` : 'Nenhuma aresta ainda.'} Clique nas arestas na vista para pôr ou tirar.</div>
+        ${n ? `<button class="btn soft wide" data-act="clear-picks">Limpar escolha</button>` : ''}`}`;
+    }
+    if (f.type === 'shell') {
+      const n = f.faces.length;
+      return `
+        ${this.numField('Espessura da parede', 'thickness', f.thickness)}
+        <div class="hint">${n ? `${n} ${n === 1 ? 'face aberta' : 'faces abertas'}.` : 'Nenhuma face ainda.'} Clique na face que fica aberta (ex.: a de cima).</div>
+        ${n ? `<button class="btn soft wide" data-act="clear-picks">Limpar escolha</button>` : ''}`;
+    }
+    if (f.type === 'hole') {
+      const xyz = f.at ? `<div class="pe-row">${this.numField('X', 'at.0', f.at[0])}${this.numField('Y', 'at.1', f.at[1])}${this.numField('Z', 'at.2', f.at[2])}</div>` : '';
+      return `
+        <div class="hint">${f.at ? 'Clique noutra face para mudar o lugar do furo.' : 'Clique na face onde vai o furo.'}</div>
+        ${xyz}
+        <label class="pe-field"><span>Tipo</span>${sel('kind', f.kind, [['simple', 'Simples'], ['counterbore', 'Com rebaixo (cabeça de parafuso)'], ['countersink', 'Escareado (cabeça chata)']])}</label>
+        <div class="pe-row">${this.numField('Diâmetro', 'diameter', f.diameter)}${f.through ? '' : this.numField('Profundidade', 'depth', f.depth)}</div>
+        <label class="pe-check"><input type="checkbox" data-k="through" ${f.through ? 'checked' : ''}/> Atravessar tudo</label>
+        ${f.kind === 'simple' ? '' : `<div class="pe-row">${this.numField(f.kind === 'counterbore' ? 'Diâm. do rebaixo' : 'Diâm. do escareado', 'headDiameter', f.headDiameter)}${f.kind === 'counterbore' ? this.numField('Prof. do rebaixo', 'headDepth', f.headDepth) : ''}</div>`}`;
+    }
+    if (f.type !== 'pattern') return '';
+    const idx = this.part.features.indexOf(f);
+    const usable = this.part.features.slice(0, idx).filter((x) => x.type === 'extrude' || x.type === 'revolve' || x.type === 'hole');
+    const srcs = `<div class="pe-field"><span>O que repetir</span>
+      <label class="pe-check"><input type="checkbox" data-k="src:" ${f.sources.length ? '' : 'checked'}/> A peça inteira</label>
+      ${usable.map((x) => `<label class="pe-check"><input type="checkbox" data-k="src:${x.id}" ${f.sources.includes(x.id) ? 'checked' : ''}/> ${esc(x.name)}</label>`).join('')}</div>`;
+    if (f.kind === 'mirror')
+      return `${srcs}<label class="pe-field"><span>Plano do espelho</span>${sel('plane', f.plane, (Object.keys(PLANES) as PlaneName[]).map((p) => [p, PLANES[p].label]))}</label>`;
+    if (f.kind === 'circular')
+      return `${srcs}
+        <label class="pe-field"><span>Eixo de giro (pela origem)</span>${sel('axis', f.axis, axes)}</label>
+        <div class="pe-row">${this.numField('Quantidade', 'count', f.count, '')}${this.numField('Ângulo total', 'angle', f.angle, '°')}</div>`;
+    return `${srcs}
+      <label class="pe-field"><span>Direção</span>${sel('axis', f.axis, axes)}</label>
+      <div class="pe-row">${this.numField('Quantidade', 'count', f.count, '')}${this.numField('Espaço', 'spacing', f.spacing)}</div>
+      <label class="pe-field"><span>Segunda direção</span>${sel('axis2', f.axis2 ?? '', [['', 'Nenhuma'], ...axes])}</label>
+      ${f.axis2 ? `<div class="pe-row">${this.numField('Quantidade', 'count2', f.count2, '')}${this.numField('Espaço', 'spacing2', f.spacing2)}</div>` : ''}`;
   }
 
   private sketchPanel() {
@@ -444,6 +695,27 @@ class PartEditor {
         case 'extrude':
         case 'revolve':
           return this.addFeature(act.dataset.act);
+        case 'hole':
+        case 'fillet':
+        case 'chamfer':
+        case 'shell':
+          return this.addModifier(act.dataset.act);
+        case 'pattern':
+          return showMenu(
+            [
+              { heading: 'Padrão' },
+              { label: 'Em linha / grade', icon: 'pattern', action: () => this.addPattern('linear') },
+              { label: 'Em círculo', icon: 'revolve', action: () => this.addPattern('circular') },
+              { label: 'Espelhar', icon: 'pattern', action: () => this.addPattern('mirror') },
+            ],
+            act,
+          );
+        case 'clear-picks': {
+          const f = this.feature(this.selected);
+          if (f?.type === 'fillet' || f?.type === 'chamfer') f.edges = [];
+          if (f?.type === 'shell') f.faces = [];
+          return this.changed();
+        }
         case 'edit-sketch':
           return this.enterSketch(id);
         case 'del':
@@ -458,10 +730,21 @@ class PartEditor {
       return;
     }
     const row = t.closest<HTMLElement>('[data-feat]');
-    if (row && !t.closest('select, input')) {
-      this.selected = row.dataset.feat!;
-      this.renderSide();
-    }
+    if (row && !t.closest('select, input')) this.select(row.dataset.feat!);
+  }
+
+  /** Select a feature; fillets, shells and holes show the part before them so edges and faces can be clicked. */
+  private select(id: string | null) {
+    const was = this.pickFeature;
+    this.selected = id;
+    if (this.pickFeature !== was) this.changed();
+    else this.renderSide();
+  }
+
+  /** The selected feature, when it is one that is set up by clicking the part. */
+  private get pickFeature(): EdgeFeature | ShellFeature | HoleFeature | null {
+    const f = this.sketchId ? null : this.feature(this.selected);
+    return f && (f.type === 'fillet' || f.type === 'chamfer' || f.type === 'shell' || f.type === 'hole') ? f : null;
   }
 
   private fieldChange(e: Event) {
@@ -480,12 +763,22 @@ class PartEditor {
 
     const f = this.feature(this.selected);
     if (!f) return;
-    if (typeof val === 'boolean') (f as unknown as Record<string, unknown>)[k] = val;
-    else if (['offset', 'distance', 'angle'].includes(k)) {
+    const rec = f as unknown as Record<string, unknown>;
+    if (k.startsWith('src:') && f.type === 'pattern') {
+      const id = k.slice(4);
+      if (!id) f.sources = [];
+      else f.sources = val ? [...f.sources, id] : f.sources.filter((x) => x !== id);
+    } else if (k.startsWith('at.') && f.type === 'hole' && f.at) {
+      const n = num(String(val));
+      if (!Number.isFinite(n)) return this.renderSide();
+      f.at[Number(k.slice(3))] = n;
+    } else if (typeof val === 'boolean') rec[k] = val;
+    else if (['offset', 'distance', 'angle', 'size', 'thickness', 'diameter', 'depth', 'headDiameter', 'headDepth', 'count', 'spacing', 'count2', 'spacing2'].includes(k)) {
       const n = num(val);
       if (!Number.isFinite(n)) return this.renderSide();
-      (f as unknown as Record<string, unknown>)[k] = n;
-    } else (f as unknown as Record<string, unknown>)[k] = val;
+      rec[k] = n;
+    } else if (k === 'axis2') rec[k] = val || null;
+    else rec[k] = val;
     this.changed();
   }
 
@@ -741,13 +1034,40 @@ class PartEditor {
     this.changed();
   }
 
+  private addModifier(type: 'hole' | 'fillet' | 'chamfer' | 'shell') {
+    const base = { id: fid(), name: nextName(this.part, type) };
+    const f: Feature =
+      type === 'hole'
+        ? { ...base, type, at: null, n: [0, 0, 1], diameter: 5, depth: 10, through: false, kind: 'simple', headDiameter: 9, headDepth: 3 }
+        : type === 'shell'
+          ? { ...base, type, faces: [], thickness: 2 }
+          : { ...base, type, edges: [], all: false, size: type === 'fillet' ? 2 : 1 };
+    this.part.features.push(f);
+    this.select(f.id);
+    this.status.textContent = type === 'hole' ? 'Clique na face onde vai o furo.' : type === 'shell' ? 'Clique na face que fica aberta.' : 'Clique nas arestas da peça.';
+  }
+
+  private addPattern(kind: PatternFeature['kind']) {
+    // Spread copies of the whole part just past its own width.
+    const box = new THREE.Box3().setFromObject(this.solid);
+    const w = box.isEmpty() ? 20 : r2(box.max.x - box.min.x + 5);
+    const n = this.part.features.filter((x) => x.type === 'pattern' && (x.kind === 'mirror') === (kind === 'mirror')).length + 1;
+    const f: PatternFeature = {
+      id: fid(), type: 'pattern', name: kind === 'mirror' ? `Espelho ${n}` : `Padrão ${n}`, kind, sources: [],
+      axis: kind === 'circular' ? 'z' : 'x', count: kind === 'circular' ? 4 : 3, spacing: w, angle: 360, axis2: null, count2: 2, spacing2: w, plane: 'YZ',
+    };
+    this.part.features.push(f);
+    this.select(f.id);
+    this.changed();
+  }
+
   private deleteFeature(id: string) {
     const f = this.feature(id);
     if (!f) return;
-    const users = this.part.features.filter((x) => x.type !== 'sketch' && x.sketch === id);
+    const users = this.part.features.filter((x) => featureSketch(x) === id || (x.type === 'pattern' && x.sources.includes(id)));
     if (users.length) return toast(`“${f.name}” é usado por ${users.map((u) => `“${u.name}”`).join(', ')}. Apague essas operações antes.`, 'error', 4500);
     this.part.features = this.part.features.filter((x) => x.id !== id);
-    if (this.selected === id) this.selected = null;
+    if (this.selected === id) this.select(null);
     this.changed();
   }
 
@@ -786,7 +1106,7 @@ class PartEditor {
     this.look(new THREE.Vector3(0.6, -0.8, 0.6), new THREE.Vector3(0, 0, 1));
     const sketch = this.feature(this.selected);
     // A first closed sketch is usually extruded next: offer it right away.
-    if (sketch?.type === 'sketch' && sketchProfiles(sketch.entities).profiles.length && !this.part.features.some((f) => f.type !== 'sketch' && f.sketch === sketch.id)) {
+    if (sketch?.type === 'sketch' && sketchProfiles(sketch.entities).profiles.length && !this.part.features.some((f) => featureSketch(f) === sketch.id)) {
       this.addFeature('extrude');
     } else this.changed();
   }
@@ -890,6 +1210,15 @@ class PartEditor {
   }
 
   private pointerMove(e: PointerEvent) {
+    if (this.pickFeature && e.buttons === 0) {
+      const h = this.pickAt(e);
+      if (JSON.stringify(h) !== JSON.stringify(this.hoverPick)) {
+        this.hoverPick = h;
+        this.renderer.domElement.style.cursor = h ? 'pointer' : '';
+        this.drawPicks();
+      }
+      return;
+    }
     if (!this.sketchId) return;
     const canvas = this.renderer.domElement;
     if (this.drag) {
@@ -935,6 +1264,7 @@ class PartEditor {
   }
 
   private pointerDown(e: PointerEvent) {
+    if (e.button === 0 && this.pickFeature) return this.pickClick(e);
     if (!this.sketchId || e.button !== 0) return;
     if (this.tool === 'select') {
       const near = this.nearPoint(e, 9);
@@ -1051,7 +1381,7 @@ class PartEditor {
     e.stopPropagation();
     const k = e.key.toLowerCase();
     if (!this.sketchId) {
-      if (k === 'escape') this.selected = null, this.renderSide();
+      if (k === 'escape') this.select(null);
       return;
     }
     if (k === 'escape') {
