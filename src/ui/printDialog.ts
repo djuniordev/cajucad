@@ -126,8 +126,10 @@ export async function openPrintDialog() {
   unsub.push(api.printers.onUpload((p) => ((uploadPct = p), renderRight())));
   const onStatus = () => {
     // New AMS readout: re-match slots to trays unless the user already picked.
-    renderLeft();
-    renderRight();
+    // Redrawing a column replaces its elements, which closes an open dropdown and drops the typing focus.
+    const editing = (col: HTMLElement) => col.contains(document.activeElement) && /^(SELECT|INPUT|TEXTAREA)$/.test(document.activeElement!.tagName);
+    if (!editing(left)) renderLeft();
+    if (!editing(right)) renderRight();
   };
   statusListeners.add(onStatus);
   unsub.push(() => statusListeners.delete(onStatus));
