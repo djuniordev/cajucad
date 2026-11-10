@@ -61,7 +61,8 @@ export interface SketchFeature {
   id: string;
   type: 'sketch';
   name: string;
-  plane: PlaneName;
+  /** A main plane, or the id of a construction plane. */
+  plane: PlaneName | string;
   /** Distance of the sketch plane along its normal, mm. */
   offset: number;
   entities: SketchEntity[];
@@ -168,8 +169,8 @@ export interface RevolveFeature {
   type: 'revolve';
   name: string;
   sketch: string;
-  /** Sketch axis to revolve around (through the sketch origin). */
-  axis: 'x' | 'y';
+  /** Sketch axis to revolve around (through the sketch origin), or a construction axis id. */
+  axis: 'x' | 'y' | string;
   angle: number;
   op: BodyOp;
 }
@@ -224,7 +225,8 @@ export interface PatternFeature {
   name: string;
   kind: 'linear' | 'circular' | 'mirror';
   sources: string[];
-  axis: Axis3;
+  /** Direction (linear) or turning axis through the origin (circular), or a construction axis id. */
+  axis: Axis3 | string;
   count: number;
   /** Linear: distance between copies, mm. Circular: total angle, degrees. */
   spacing: number;
@@ -233,9 +235,62 @@ export interface PatternFeature {
   axis2: Axis3 | null;
   count2: number;
   spacing2: number;
-  /** Mirror plane through the origin. */
-  plane: PlaneName;
+  /** Mirror plane through the origin, or a construction plane id. */
+  plane: PlaneName | string;
 }
+
+/** Placement of a plane in the world: origin, in-plane X and Y, and normal. */
+export interface Frame {
+  o: V3;
+  x: V3;
+  y: V3;
+  n: V3;
+}
+export interface AxisLine {
+  o: V3;
+  d: V3;
+}
+
+/**
+ * Construction plane: `offset` from another plane, turned `angle` degrees about one of that
+ * plane's axes, through three construction points, or on a flat face of the part.
+ */
+export interface PlaneFeature {
+  id: string;
+  type: 'plane';
+  name: string;
+  kind: 'offset' | 'angle' | 'points' | 'face';
+  /** Main plane or construction plane it starts from (offset, angle). */
+  ref: string;
+  offset: number;
+  angle: number;
+  hinge: 'x' | 'y';
+  points: string[];
+  /** Point on the picked face. */
+  face: V3 | null;
+  flip: boolean;
+}
+
+/** Construction axis: a main axis, through two points, along a straight edge or through a round face. */
+export interface AxisFeature {
+  id: string;
+  type: 'axis';
+  name: string;
+  kind: 'world' | 'points' | 'edge' | 'cylinder';
+  world: Axis3;
+  points: string[];
+  pick: V3 | null;
+}
+
+/** Construction point: typed in, or clicked on the part. */
+export interface PointFeature {
+  id: string;
+  type: 'point';
+  name: string;
+  at: V3;
+}
+
+export type ConstructionFeature = PlaneFeature | AxisFeature | PointFeature;
 
 /** A closed profile carried along a path (open or closed lines/arcs of another sketch). */
 export interface SweepFeature {
@@ -292,7 +347,8 @@ export type Feature =
   | SweepFeature
   | LoftFeature
   | ThreadFeature
-  | ImportFeature;
+  | ImportFeature
+  | ConstructionFeature;
 
 /** Sketches a feature is built from. */
 export function featureSketches(f: Feature): string[] {
@@ -300,6 +356,113 @@ export function featureSketches(f: Feature): string[] {
   if (f.type === 'sweep') return [f.sketch, f.path];
   if (f.type === 'loft') return f.sketches;
   return [];
+}
+
+/** Every other feature a feature depends on (sketches, construction geometry, pattern sources). */
+export function featureRefs(f: Feature): string[] {
+  const out = [...featureSketches(f)];
+  if (f.type === 'sketch') out.push(f.plane);
+  if (f.type === 'revolve') out.push(f.axis);
+  if (f.type === 'pattern') out.push(...f.sources, f.axis, f.plane);
+  if (f.type === 'plane') out.push(f.ref, ...f.points);
+  if (f.type === 'axis') out.push(...f.points);
+  return out;
+}
+
+export const isConstruction = (f: Feature): f is ConstructionFeature => f.type === 'plane' || f.type === 'axis' || f.type === 'point';
+
+// ---------- 3D vectors and frames ----------
+
+export const v3 = {
+  add: (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]],
+  sub: (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]],
+  mul: (a: V3, k: number): V3 => [a[0] * k, a[1] * k, a[2] * k],
+  dot: (a: V3, b: V3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2],
+  cross: (a: V3, b: V3): V3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]],
+  len: (a: V3) => Math.hypot(a[0], a[1], a[2]),
+  unit: (a: V3): V3 => {
+    const l = Math.hypot(a[0], a[1], a[2]) || 1;
+    return [a[0] / l, a[1] / l, a[2] / l];
+  },
+  /** Turn v by `deg` degrees around the unit axis k (Rodrigues). */
+  rotate: (v: V3, k: V3, deg: number): V3 => {
+    const t = (deg * Math.PI) / 180, c = Math.cos(t), s = Math.sin(t);
+    const kv = v3.cross(k, v), kd = v3.dot(k, v);
+    return [0, 1, 2].map((i) => v[i] * c + kv[i] * s + k[i] * kd * (1 - c)) as V3;
+  },
+};
+
+export const worldFrame = (p: PlaneName): Frame => ({ o: [0, 0, 0], x: PLANES[p].x, y: PLANES[p].y, n: PLANES[p].n });
+
+/** In-plane X for a plane with normal n: world X (or Y) laid onto the plane. */
+export function frameFromNormal(o: V3, n: V3): Frame {
+  const N = v3.unit(n);
+  const seed: V3 = Math.abs(N[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
+  const x = v3.unit(v3.sub(seed, v3.mul(N, v3.dot(seed, N))));
+  return { o, x, y: v3.cross(N, x), n: N };
+}
+
+/** Construction geometry known so far while (re)building the history. */
+export interface Refs {
+  frames: Record<string, Frame>;
+  axes: Record<string, AxisLine>;
+  points: Record<string, V3>;
+}
+export const emptyRefs = (): Refs => ({ frames: {}, axes: {}, points: {} });
+
+/** A main plane or a construction plane. */
+export function frameOf(ref: string, refs: Refs): Frame | null {
+  if (ref in PLANES) return worldFrame(ref as PlaneName);
+  return refs.frames[ref] ?? null;
+}
+
+/** Where a sketch lies, its offset included. */
+export function sketchFrame(s: Pick<SketchFeature, 'plane' | 'offset'>, refs: Refs): Frame | null {
+  const f = frameOf(s.plane, refs);
+  return f && { ...f, o: v3.add(f.o, v3.mul(f.n, s.offset)) };
+}
+
+export const AXIS_DIR: Record<Axis3, V3> = { x: [1, 0, 0], y: [0, 1, 0], z: [0, 0, 1] };
+
+/** Frame of a construction plane that does not need the solid (all kinds but `face`). */
+export function planeFrame(f: PlaneFeature, refs: Refs): Frame {
+  if (f.kind === 'points') {
+    const ps = f.points.map((id) => refs.points[id]);
+    if (ps.length !== 3 || ps.some((p) => !p)) throw new Error('Escolha três pontos de construção.');
+    const n = v3.cross(v3.sub(ps[1], ps[0]), v3.sub(ps[2], ps[0]));
+    if (v3.len(n) < 1e-9) throw new Error('Os três pontos estão em linha: não formam um plano.');
+    const x = v3.unit(v3.sub(ps[1], ps[0]));
+    const N = v3.unit(f.flip ? v3.mul(n, -1) : n);
+    return { o: ps[0], x, y: v3.cross(N, x), n: N };
+  }
+  const base = frameOf(f.ref, refs);
+  if (!base) throw new Error('O plano de base foi apagado ou vem depois deste.');
+  let fr: Frame = base;
+  if (f.kind === 'angle') {
+    const k = f.hinge === 'x' ? base.x : base.y;
+    fr = { o: base.o, x: v3.rotate(base.x, k, f.angle), y: v3.rotate(base.y, k, f.angle), n: v3.rotate(base.n, k, f.angle) };
+  }
+  fr = { ...fr, o: v3.add(fr.o, v3.mul(fr.n, f.kind === 'offset' ? f.offset : 0)) };
+  return f.flip ? { o: fr.o, x: fr.x, y: v3.mul(fr.y, -1), n: v3.mul(fr.n, -1) } : fr;
+}
+
+/** Axis that does not need the solid (main axes and two points). */
+export function axisLine(f: AxisFeature, refs: Refs): AxisLine | null {
+  if (f.kind === 'world') return { o: [0, 0, 0], d: AXIS_DIR[f.world] };
+  if (f.kind === 'points') {
+    const ps = f.points.map((id) => refs.points[id]);
+    if (ps.length !== 2 || ps.some((p) => !p)) throw new Error('Escolha dois pontos de construção.');
+    const d = v3.sub(ps[1], ps[0]);
+    if (v3.len(d) < 1e-9) throw new Error('Os dois pontos são o mesmo.');
+    return { o: ps[0], d: v3.unit(d) };
+  }
+  return null;
+}
+
+/** Main axis name or construction axis id, as a line. */
+export function axisOf(ref: string, refs: Refs): AxisLine | null {
+  if (ref === 'x' || ref === 'y' || ref === 'z') return { o: [0, 0, 0], d: AXIS_DIR[ref] };
+  return refs.axes[ref] ?? null;
 }
 
 export interface PartDef {
@@ -316,10 +479,13 @@ export const PLANES: Record<PlaneName, { label: string; x: V3; y: V3; n: V3 }> =
   YZ: { label: 'Lateral (YZ)', x: [0, 1, 0], y: [0, 0, 1], n: [1, 0, 0] },
 };
 
-/** World point of a sketch point. */
-export function sketchToWorld(s: Pick<SketchFeature, 'plane' | 'offset'>, p: V2): V3 {
-  const P = PLANES[s.plane];
-  return [0, 1, 2].map((i) => P.x[i] * p[0] + P.y[i] * p[1] + P.n[i] * s.offset) as V3;
+/** World point of a point on a frame. */
+export const frameToWorld = (f: Frame, p: V2): V3 => v3.add(f.o, v3.add(v3.mul(f.x, p[0]), v3.mul(f.y, p[1])));
+
+/** Name of a main or construction plane, for lists. */
+export function planeLabel(ref: string, features: Feature[]) {
+  if (ref in PLANES) return PLANES[ref as PlaneName].label;
+  return features.find((f) => f.id === ref)?.name ?? '(plano apagado)';
 }
 
 export const fid = () => Math.random().toString(36).slice(2, 9);
@@ -336,7 +502,7 @@ export function parsePart(json: unknown): PartDef | null {
 
 export const featureLabel: Record<Feature['type'], string> = {
   sketch: 'Esboço', extrude: 'Extrusão', revolve: 'Revolução', fillet: 'Filete', chamfer: 'Chanfro', shell: 'Casca', hole: 'Furo', pattern: 'Padrão',
-  sweep: 'Varredura', loft: 'Loft', thread: 'Rosca', import: 'Importado',
+  sweep: 'Varredura', loft: 'Loft', thread: 'Rosca', import: 'Importado', plane: 'Plano', axis: 'Eixo', point: 'Ponto',
 };
 
 export function nextName(part: PartDef, type: Feature['type']) {

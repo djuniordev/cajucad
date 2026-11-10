@@ -5,13 +5,24 @@
 import type { Drawing, Edge, Face, Shape3D, Sketch, Wire } from 'replicad';
 import { cutThreads, type ThreadCut } from './threads';
 import {
-  PLANES,
   pointInPolygon,
   polygonArea,
   profilePoints,
   sketchPath,
   sketchProfiles,
   splineBeziers,
+  axisLine,
+  axisOf,
+  emptyRefs,
+  frameFromNormal,
+  frameOf,
+  planeFrame,
+  sketchFrame,
+  v3,
+  type AxisLine,
+  type ConstructionFeature,
+  type Frame,
+  type Refs,
   type Seg,
   type V2,
   type Axis3,
@@ -67,9 +78,18 @@ export interface BuildResult {
 
 const scale = (v: V3, k: number): V3 => [v[0] * k, v[1] * k, v[2] * k];
 
+/** Construction geometry of the history being built (set at the start of buildPart). */
+let refs: Refs = emptyRefs();
+
+function frameFor(s: SketchFeature): Frame {
+  const f = sketchFrame(s, refs);
+  if (!f) throw new Error(`O plano de “${s.name}” foi apagado ou vem depois do esboço.`);
+  return f;
+}
+
 function planeFor(rc: Replicad, s: SketchFeature, shift = 0) {
-  const P = PLANES[s.plane];
-  return new rc.Plane(scale(P.n, s.offset + shift), P.x, P.n);
+  const f = frameFor(s);
+  return new rc.Plane(v3.add(f.o, v3.mul(f.n, shift)), f.x, f.n);
 }
 
 /** Draw a chain of segments; a closed one ends with close() (which draws a last straight edge itself). */
@@ -116,7 +136,7 @@ function featureSolid(rc: Replicad, f: SolidFeature, sketches: Map<string, Sketc
   const s = sketches.get(f.sketch);
   if (!s) throw new Error('O esboço desta operação foi apagado.');
   const region = sketchDrawing(rc, s);
-  const P = PLANES[s.plane];
+  const P = frameFor(s);
   if (f.type === 'extrude') {
     if (!(f.distance > 0)) throw new Error('A distância precisa ser maior que zero.');
     if (f.symmetric) return region.sketchOnPlane(planeFor(rc, s, -f.distance / 2)).extrude(f.distance) as Shape3D;
@@ -124,8 +144,14 @@ function featureSolid(rc: Replicad, f: SolidFeature, sketches: Map<string, Sketc
     return region.sketchOnPlane(planeFor(rc, s)).extrude(f.distance, { extrusionDirection: dir }) as Shape3D;
   }
   if (!(f.angle > 0 && f.angle <= 360)) throw new Error('O ângulo precisa estar entre 0 e 360°.');
-  const axis = f.axis === 'x' ? P.x : P.y;
-  return region.sketchOnPlane(planeFor(rc, s)).revolve(axis, { origin: scale(P.n, s.offset), angle: f.angle }) as Shape3D;
+  let ax: AxisLine;
+  if (f.axis === 'x' || f.axis === 'y') ax = { o: P.o, d: f.axis === 'x' ? P.x : P.y };
+  else {
+    const a = refs.axes[f.axis];
+    if (!a) throw new Error('O eixo desta revolução foi apagado ou vem depois dela.');
+    ax = a;
+  }
+  return region.sketchOnPlane(planeFor(rc, s)).revolve(ax.d, { origin: ax.o, angle: f.angle }) as Shape3D;
 }
 
 /** Each closed outline of a sketch as a wire on its plane, largest first, marked when it is a hole. */
@@ -168,6 +194,64 @@ function loftSolid(rc: Replicad, f: LoftFeature, sketches: Map<string, SketchFea
     return ws[0].wire;
   });
   return rc.loft(wires, { ruled: f.ruled });
+}
+
+/** Plane, axis or point of a construction feature (the solid is needed for faces and edges). */
+function construct(rc: Replicad, f: ConstructionFeature, body: Shape3D | null) {
+  if (f.type === 'point') {
+    refs.points[f.id] = f.at;
+    return;
+  }
+  if (f.type === 'plane') {
+    if (f.kind !== 'face') {
+      refs.frames[f.id] = planeFrame(f, refs);
+      return;
+    }
+    if (!f.face) throw new Error('Clique numa face plana da peça.');
+    if (!body) throw new Error('Ainda não há peça para escolher uma face.');
+    const [face] = findNear(rc, body, body.faces, [f.face], 'faces');
+    if (face.geomType !== 'PLANE') throw new Error('Esta face não é plana. Escolha uma face reta.');
+    const n = face.normalAt(f.face);
+    const N: V3 = [n.x, n.y, n.z];
+    // Keep the clicked point on the (possibly moved) face.
+    const c = face.center;
+    const o = v3.sub(f.face, v3.mul(N, v3.dot(v3.sub(f.face, [c.x, c.y, c.z]), N)));
+    const fr = frameFromNormal(o, f.flip ? v3.mul(N, -1) : N);
+    refs.frames[f.id] = fr;
+    return;
+  }
+  const line = axisLine(f, refs);
+  if (line) {
+    refs.axes[f.id] = line;
+    return;
+  }
+  if (!f.pick) throw new Error(f.kind === 'edge' ? 'Clique numa aresta reta da peça.' : 'Clique numa face redonda da peça.');
+  if (!body) throw new Error('Ainda não há peça para escolher.');
+  if (f.kind === 'edge') {
+    const [edge] = findNear(rc, body, body.edges, [f.pick], 'arestas');
+    if (edge.geomType !== 'LINE') throw new Error('Esta aresta não é reta.');
+    const a = edge.startPoint, b = edge.endPoint;
+    refs.axes[f.id] = { o: [a.x, a.y, a.z], d: v3.unit([b.x - a.x, b.y - a.y, b.z - a.z]) };
+    return;
+  }
+  const [face] = findNear(rc, body, body.faces, [f.pick], 'faces');
+  const c = cylinderOf(rc, face);
+  if (!c) throw new Error('Esta face não é redonda (cilíndrica).');
+  refs.axes[f.id] = { o: c.loc, d: c.axis };
+}
+
+/** Axis and radius of a cylindrical face, with its extent along the axis (V parameters). */
+function cylinderOf(rc: Replicad, face: Face) {
+  const oc = rc.getOC();
+  const ad = new oc.BRepAdaptor_Surface(face.wrapped, true);
+  try {
+    if (ad.GetType() !== oc.GeomAbs_SurfaceType.GeomAbs_Cylinder) return null;
+    const cyl = ad.Cylinder();
+    const loc = cyl.Location(), dir = cyl.Axis().Direction();
+    return { loc: [loc.X(), loc.Y(), loc.Z()] as V3, axis: [dir.X(), dir.Y(), dir.Z()] as V3, radius: cyl.Radius(), v0: ad.FirstVParameter(), v1: ad.LastVParameter() };
+  } finally {
+    ad.delete();
+  }
 }
 
 /** Where a thread goes: axis, radius and length of the picked cylindrical face (cut later, on the mesh). */
@@ -283,13 +367,19 @@ function findNear<T extends Edge | Face>(rc: Replicad, shape: Shape3D, items: T[
 /** Placements of the copies of a pattern (the original excluded). */
 function patternCopies(f: PatternFeature): ((s: Shape3D) => Shape3D)[] {
   const out: ((s: Shape3D) => Shape3D)[] = [];
-  if (f.kind === 'mirror') return [(s) => s.clone().mirror(f.plane, [0, 0, 0])];
+  if (f.kind === 'mirror') {
+    const fr = frameOf(f.plane, refs);
+    if (!fr) throw new Error('O plano do espelho foi apagado ou vem depois do padrão.');
+    return [(s) => s.clone().mirror(fr.n, fr.o)];
+  }
+  const ax = axisOf(f.axis, refs);
+  if (!ax) throw new Error('O eixo do padrão foi apagado ou vem depois dele.');
   const n = Math.round(f.count);
   if (!(n >= 1 && n <= 200)) throw new Error('A quantidade precisa ficar entre 1 e 200.');
   if (f.kind === 'circular') {
     if (!(f.angle > 0 && f.angle <= 360)) throw new Error('O ângulo precisa estar entre 0 e 360°.');
     const step = f.angle >= 360 ? 360 / n : f.angle / Math.max(1, n - 1);
-    for (let i = 1; i < n; i++) out.push((s) => s.clone().rotate(i * step, [0, 0, 0], AXES[f.axis]));
+    for (let i = 1; i < n; i++) out.push((s) => s.clone().rotate(i * step, ax.o, ax.d));
     return out;
   }
   const n2 = f.axis2 ? Math.round(f.count2) : 1;
@@ -297,7 +387,7 @@ function patternCopies(f: PatternFeature): ((s: Shape3D) => Shape3D)[] {
   for (let i = 0; i < n; i++)
     for (let j = 0; j < n2; j++) {
       if (!i && !j) continue;
-      const d = scale(AXES[f.axis], i * f.spacing);
+      const d = scale(ax.d, i * f.spacing);
       const d2 = f.axis2 ? scale(AXES[f.axis2], j * f.spacing2) : ([0, 0, 0] as V3);
       out.push((s) => s.clone().translate([d[0] + d2[0], d[1] + d2[1], d[2] + d2[2]]));
     }
@@ -317,8 +407,9 @@ export interface BuildOptions {
 }
 
 /** Rebuild the whole history. Stops at the first failing feature and keeps what was built before it. */
-export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise<BuildResult & { shape: Shape3D | null; edges?: number[][] }> {
+export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise<BuildResult & { shape: Shape3D | null; edges?: number[][]; refs: Refs }> {
   const rc = await loadKernel();
+  refs = emptyRefs();
   const sketches = new Map<string, SketchFeature>();
   // Solids each feature added or removed, for patterns.
   const tools = new Map<string, { tool: Shape3D; op: BodyOp }>();
@@ -336,6 +427,11 @@ export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise
       switch (f.type) {
         case 'sketch':
           sketches.set(f.id, f);
+          break;
+        case 'plane':
+        case 'axis':
+        case 'point':
+          construct(rc, f, shape);
           break;
         case 'extrude':
         case 'revolve': {
@@ -427,7 +523,7 @@ export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise
       error ??= { feature: threadIds.at(-1)!, message: kernelMessage(e) };
     }
   }
-  return { shape, mesh, error, edges };
+  return { shape, mesh, error, edges, refs };
 }
 
 /** OpenCascade failures come out as bare numbers or English; say something useful. */

@@ -19,8 +19,21 @@ import {
   constraintEntities,
   curveEnds,
   ellipsePoints,
+  emptyRefs,
+  featureRefs,
+  frameToWorld,
+  isConstruction,
+  planeLabel,
+  sketchFrame,
   splinePoints,
   textContours,
+  v3,
+  type AxisFeature,
+  type ConstructionFeature,
+  type Frame,
+  type PlaneFeature,
+  type PointFeature,
+  type Refs,
   featureSketches,
   fid,
   isDimension,
@@ -180,6 +193,10 @@ class PartEditor {
   /** Inner point of a spline being dragged (not a solver point). */
   private splineDrag: { e: string; i: number } | null = null;
   private imageTex: { src: string; tex: THREE.Texture } | null = null;
+  /** Construction planes, axes and points as last built. */
+  private refs: Refs = emptyRefs();
+  private sketchAfterPick: string | null = null;
+  private constructGroup = new THREE.Group();
 
   // view
   private root: HTMLElement;
@@ -242,7 +259,7 @@ class PartEditor {
     this.scene.add(new THREE.HemisphereLight(0xffffff, 0x8a8580, 2.2));
     const sun = new THREE.DirectionalLight(0xffffff, 1.6);
     sun.position.set(60, -80, 140);
-    this.scene.add(sun, this.solid, this.sketch, this.picksGroup, this.measureGroup, this.floorGrid(), new THREE.AxesHelper(20));
+    this.scene.add(sun, this.solid, this.sketch, this.picksGroup, this.measureGroup, this.constructGroup, this.floorGrid(), new THREE.AxesHelper(20));
     this.sketch.matrixAutoUpdate = false;
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(this.host);
@@ -353,15 +370,17 @@ class PartEditor {
       try {
         return await buildPart(part, o);
       } catch (e) {
-        return { mesh: null, shape: null, edges: undefined, error: { feature: '', message: (e as Error).message } };
+        return { mesh: null, shape: null, edges: undefined, refs: emptyRefs(), error: { feature: '', message: (e as Error).message } };
       }
     };
     const r = await safe();
     // Fillets, shells and holes are set up on the part as it was before them.
-    const view = pf ? await safe({ before: pf.id, edges: pf.type === 'fillet' || pf.type === 'chamfer' }) : r;
+    const view = pf ? await safe({ before: pf.id, edges: this.picksEdges }) : r;
     if (seq !== this.buildSeq) return;
     this.errors.clear();
     if (r.error) this.errors.set(r.error.feature, r.error.message);
+    this.refs = r.refs;
+    this.drawConstruction();
     this.showSolid(view.mesh);
     this.pickEdges = view.edges ?? null;
     this.drawPicks();
@@ -374,7 +393,13 @@ class PartEditor {
             ? 'Clique nas faces que ficam abertas. Esc mostra o resultado.'
             : pf.type === 'thread'
               ? 'Clique na face redonda que leva a rosca. Esc mostra o resultado.'
-            : 'Clique nas arestas para pôr ou tirar. Esc mostra o resultado.';
+              : pf.type === 'plane'
+                ? 'Clique numa face plana da peça.'
+                : pf.type === 'axis'
+                  ? pf.kind === 'edge' ? 'Clique numa aresta reta.' : 'Clique na face redonda de um furo ou pino.'
+                  : pf.type === 'point'
+                    ? 'Clique na peça para pôr o ponto ali, ou digite as coordenadas.'
+                    : 'Clique nas arestas para pôr ou tirar. Esc mostra o resultado.';
       this.status.textContent = r.error ? `⚠ ${this.feature(r.error.feature)?.name ?? 'Erro'}: ${r.error.message}` : hint || (r.mesh ? 'Peça atualizada.' : 'Crie um esboço e depois extrude ou revolva.');
     }
     this.status.classList.toggle('warn', !!r.error);
@@ -394,8 +419,8 @@ class PartEditor {
     const pf = this.pickFeature;
     if (!pf) return null;
     const [mx, my] = this.mouse(e);
-    if (pf.type === 'fillet' || pf.type === 'chamfer') {
-      if (pf.all || !this.pickEdges) return null;
+    if (this.picksEdges) {
+      if (((pf.type === 'fillet' || pf.type === 'chamfer') && pf.all) || !this.pickEdges) return null;
       let best = -1, bd = 8;
       this.pickEdges.forEach((pts, i) => {
         for (let k = 0; k + 5 < pts.length; k += 6) {
@@ -489,8 +514,38 @@ class PartEditor {
       pf.at = hit.point;
       pf.n = hit.normal;
     } else if (pf.type === 'thread' && hit.point) pf.face = hit.point;
+    else if (pf.type === 'plane' && hit.point) pf.face = hit.point;
+    else if (pf.type === 'axis' && pf.kind === 'edge' && hit.edge != null) pf.pick = this.edgeMid(hit.edge);
+    else if (pf.type === 'axis' && hit.point) pf.pick = hit.point;
+    else if (pf.type === 'point' && hit.point) pf.at = this.snapVertex(hit.point);
     this.hoverPick = null;
+    // "Sketch on a face": once the face is known, start the sketch on it.
+    if (pf.type === 'plane' && this.sketchAfterPick === pf.id) {
+      this.sketchAfterPick = null;
+      this.renderSide();
+      return void this.rebuild().then(() => {
+        if (this.refs.frames[pf.id]) this.newSketch(pf.id);
+      });
+    }
     this.changed();
+  }
+
+  /** A corner of the part near the clicked point (within 1.5 mm), else the point itself. */
+  private snapVertex(p: V3): V3 {
+    const mesh = this.solid.children[0] as THREE.Mesh | undefined;
+    if (!mesh) return p;
+    const pos = mesh.geometry.getAttribute('position');
+    const P = new THREE.Vector3(...p), v = new THREE.Vector3();
+    // Corners are where the edge lines meet: use the edge geometry's vertices.
+    const edges = this.solid.children[1] as THREE.LineSegments | undefined;
+    const src = edges?.geometry.getAttribute('position') ?? pos;
+    let best: THREE.Vector3 | null = null, bd = 1.5;
+    for (let i = 0; i < src.count; i++) {
+      v.fromBufferAttribute(src, i);
+      const d = v.distanceTo(P);
+      if (d < bd) (bd = d), (best = v.clone());
+    }
+    return best ? [r2(best.x), r2(best.y), r2(best.z)] : p;
   }
 
   /** Chosen edges and faces (and what is under the mouse) drawn over the part. */
@@ -526,8 +581,14 @@ class PartEditor {
       const chosen = new Set(pf.edges.map((p) => this.edgeNear(p)));
       for (const i of chosen) if (i >= 0) thick(this.pickEdges[i], accent, 4);
       if (hov?.edge != null && !chosen.has(hov.edge)) thick(this.pickEdges[hov.edge], accent, 3, 0.55);
-    } else if (pf.type === 'thread') {
-      const chosen = pf.face ? this.faceNear(pf.face) : -1;
+    } else if (pf.type === 'axis' && pf.kind === 'edge') {
+      if (!this.pickEdges) return;
+      const chosen = pf.pick ? this.edgeNear(pf.pick) : -1;
+      if (chosen >= 0) thick(this.pickEdges[chosen], accent, 4);
+      if (hov?.edge != null && hov.edge !== chosen) thick(this.pickEdges[hov.edge], accent, 3, 0.55);
+    } else if (pf.type === 'thread' || pf.type === 'plane' || pf.type === 'axis') {
+      const at = pf.type === 'thread' || pf.type === 'plane' ? pf.face : pf.pick;
+      const chosen = at ? this.faceNear(at) : -1;
       if (chosen >= 0) faceOverlay(chosen, 0.55);
       if (hov?.face != null && hov.face !== chosen) faceOverlay(hov.face, 0.25);
     } else if (pf.type === 'shell') {
@@ -548,6 +609,43 @@ class PartEditor {
         cyl.position.copy(new THREE.Vector3(...pf.at).addScaledVector(n, -depth / 2));
         cyl.renderOrder = 6;
         this.picksGroup.add(cyl);
+      }
+    }
+  }
+
+  /** Construction planes (see-through squares), axes (dashed lines) and points. */
+  private drawConstruction() {
+    for (const c of [...this.constructGroup.children]) {
+      this.constructGroup.remove(c);
+      (c as THREE.Mesh).geometry?.dispose();
+    }
+    if (this.sketchId) return;
+    const color = new THREE.Color(0xe39b2d);
+    for (const f of this.part.features) {
+      const on = f.id === this.selected;
+      if (f.type === 'plane' && this.refs.frames[f.id]) {
+        const fr = this.refs.frames[f.id];
+        const S = 30;
+        const corner = (a: number, b: number) => new THREE.Vector3(...v3.add(fr.o, v3.add(v3.mul(fr.x, a * S), v3.mul(fr.y, b * S))));
+        const pts = [corner(-1, -1), corner(1, -1), corner(1, 1), corner(-1, 1)];
+        const g = new THREE.BufferGeometry().setFromPoints([pts[0], pts[1], pts[2], pts[0], pts[2], pts[3]]);
+        this.constructGroup.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({ color, transparent: true, opacity: on ? 0.22 : 0.08, side: THREE.DoubleSide, depthWrite: false })));
+        this.constructGroup.add(new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color, transparent: true, opacity: on ? 1 : 0.5 })));
+        // Normal arrow from the middle.
+        this.constructGroup.add(new THREE.ArrowHelper(new THREE.Vector3(...fr.n), new THREE.Vector3(...fr.o), 10, color.getHex(), 2.5, 1.5));
+      } else if (f.type === 'axis' && this.refs.axes[f.id]) {
+        const a = this.refs.axes[f.id];
+        const l = new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(...v3.add(a.o, v3.mul(a.d, -120))), new THREE.Vector3(...v3.add(a.o, v3.mul(a.d, 120)))]),
+          new THREE.LineDashedMaterial({ color, dashSize: 4, gapSize: 2, transparent: true, opacity: on ? 1 : 0.6 }),
+        );
+        l.computeLineDistances();
+        this.constructGroup.add(l);
+      } else if (f.type === 'point' && this.refs.points[f.id]) {
+        const m = new THREE.Mesh(new THREE.SphereGeometry(on ? 1.1 : 0.8, 16, 12), new THREE.MeshBasicMaterial({ color, depthTest: false }));
+        m.position.set(...this.refs.points[f.id]);
+        m.renderOrder = 7;
+        this.constructGroup.add(m);
       }
     }
   }
@@ -755,6 +853,7 @@ class PartEditor {
         ${btn('loft', 'loft', 'Loft', twoSketches)}
         ${btn('thread', 'thread', 'Rosca', hasSolid)}
         ${btn('import-step', 'import', 'STEP', true)}
+        ${btn('construct', 'plane', 'Referência', true)}
       </div>
       ${sel ? `<div class="pe-params"><div class="panel-title">${esc(sel.name)}</div>${this.featureForm(sel)}</div>` : ''}`;
   }
@@ -773,12 +872,57 @@ class PartEditor {
     return `<label class="pe-field"><span>${label}</span><span class="field"><input data-k="${k}" value="${fmt(v)}" inputmode="decimal"/><span class="unit">${unit}</span></span></label>`;
   }
 
+  /** Main planes and the construction planes before position `idx` of the history. */
+  private planeOpts(idx: number): [string, string][] {
+    return [
+      ...(Object.keys(PLANES) as PlaneName[]).map((p): [string, string] => [p, PLANES[p].label]),
+      ...this.part.features.slice(0, idx).filter((x) => x.type === 'plane').map((x): [string, string] => [x.id, x.name]),
+    ];
+  }
+
+  private axisOpts(idx: number, base: [string, string][]): [string, string][] {
+    return [...base, ...this.part.features.slice(0, idx).filter((x) => x.type === 'axis').map((x): [string, string] => [x.id, x.name])];
+  }
+
+  private pointOpts(idx: number): [string, string][] {
+    return [['', '—'], ...this.part.features.slice(0, idx).filter((x) => x.type === 'point').map((x): [string, string] => [x.id, x.name])];
+  }
+
+  private constructionForm(f: ConstructionFeature, idx: number, sel: (k: string, cur: string, opts: [string, string][]) => string) {
+    if (f.type === 'point')
+      return `<div class="hint">Digite as coordenadas ou clique na peça para pôr o ponto ali.</div>
+        <div class="pe-row">${this.numField('X', 'at.0', f.at[0])}${this.numField('Y', 'at.1', f.at[1])}${this.numField('Z', 'at.2', f.at[2])}</div>`;
+    if (f.type === 'axis') {
+      const kinds = sel('kind', f.kind, [['world', 'Eixo principal'], ['points', 'Por dois pontos'], ['edge', 'Numa aresta reta'], ['cylinder', 'No centro de uma face redonda']]);
+      const body =
+        f.kind === 'world'
+          ? `<label class="pe-field"><span>Eixo</span>${sel('world', f.world, [['x', 'X'], ['y', 'Y'], ['z', 'Z (para cima)']])}</label>`
+          : f.kind === 'points'
+            ? `<div class="pe-row">${[0, 1].map((i) => `<label class="pe-field"><span>Ponto ${i + 1}</span>${sel(`pt:${i}`, f.points[i] ?? '', this.pointOpts(idx))}</label>`).join('')}</div>`
+            : `<div class="hint">${f.pick ? 'Clique de novo na peça para mudar.' : f.kind === 'edge' ? 'Clique numa aresta reta da peça.' : 'Clique numa face redonda (furo ou pino).'}</div>`;
+      return `<label class="pe-field"><span>Tipo</span>${kinds}</label>${body}`;
+    }
+    const kinds = sel('kind', f.kind, [['offset', 'Deslocado de outro plano'], ['angle', 'Em ângulo'], ['points', 'Por três pontos'], ['face', 'Numa face da peça']]);
+    let body = '';
+    if (f.kind === 'offset' || f.kind === 'angle') body += `<label class="pe-field"><span>Plano de base</span>${sel('ref', f.ref, this.planeOpts(idx))}</label>`;
+    if (f.kind === 'offset') body += this.numField('Distância', 'offset', f.offset);
+    if (f.kind === 'angle')
+      body += `<div class="pe-row">${this.numField('Ângulo', 'angle', f.angle, '°')}<label class="pe-field"><span>Girando em torno de</span>${sel('hinge', f.hinge, [['x', 'X do plano'], ['y', 'Y do plano']])}</label></div>`;
+    if (f.kind === 'points') body += `<div class="pe-row">${[0, 1, 2].map((i) => `<label class="pe-field"><span>Ponto ${i + 1}</span>${sel(`pt:${i}`, f.points[i] ?? '', this.pointOpts(idx))}</label>`).join('')}</div>`;
+    if (f.kind === 'face') body += `<div class="hint">${f.face ? 'Clique noutra face plana para mudar.' : 'Clique numa face plana da peça.'}</div>`;
+    return `<label class="pe-field"><span>Tipo</span>${kinds}</label>${body}
+      <label class="pe-check"><input type="checkbox" data-k="flip" ${f.flip ? 'checked' : ''}/> Inverter o lado</label>
+      <button class="btn soft wide" data-act="sketch-on" data-id="${f.id}">${icon('sketch', 15)} Novo esboço neste plano</button>`;
+  }
+
   private featureForm(f: Feature) {
+    const idx = this.part.features.indexOf(f);
+    const sel = (k: string, cur: string, opts: [string, string][]) =>
+      `<select data-k="${k}">${opts.map(([v, l]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select>`;
+    if (isConstruction(f)) return this.constructionForm(f, idx, sel);
     if (f.type === 'sketch') {
       return `
-        <label class="pe-field"><span>Plano</span><select data-k="plane">${(Object.keys(PLANES) as PlaneName[])
-          .map((p) => `<option value="${p}" ${p === f.plane ? 'selected' : ''}>${PLANES[p].label}</option>`)
-          .join('')}</select></label>
+        <label class="pe-field"><span>Plano</span>${sel('plane', f.plane, this.planeOpts(idx))}</label>
         ${this.numField('Deslocamento', 'offset', f.offset)}
         <button class="btn soft wide" data-act="edit-sketch" data-id="${f.id}">${icon('sketch', 15)} Editar esboço</button>`;
     }
@@ -793,12 +937,10 @@ class PartEditor {
     if (f.type === 'revolve')
       return `
       <label class="pe-field"><span>Esboço</span>${this.sketchSelect(f.sketch)}</label>
-      <label class="pe-field"><span>Eixo</span><select data-k="axis"><option value="y" ${f.axis === 'y' ? 'selected' : ''}>Vertical do esboço (Y)</option><option value="x" ${f.axis === 'x' ? 'selected' : ''}>Horizontal do esboço (X)</option></select></label>
+      <label class="pe-field"><span>Eixo</span>${sel('axis', f.axis, this.axisOpts(idx, [['y', 'Vertical do esboço (Y)'], ['x', 'Horizontal do esboço (X)']]))}</label>
       ${this.numField('Ângulo', 'angle', f.angle, '°')}
       <label class="pe-field"><span>Operação</span>${this.opSelect(f.op)}</label>`;
-    const sel = (k: string, cur: string, opts: [string, string][]) =>
-      `<select data-k="${k}">${opts.map(([v, l]) => `<option value="${v}" ${v === cur ? 'selected' : ''}>${l}</option>`).join('')}</select>`;
-    const axes: [string, string][] = [['x', 'X'], ['y', 'Y'], ['z', 'Z (para cima)']];
+    const axes = this.axisOpts(idx, [['x', 'X'], ['y', 'Y'], ['z', 'Z (para cima)']]);
     if (f.type === 'fillet' || f.type === 'chamfer') {
       const n = f.edges.length;
       return `
@@ -824,7 +966,6 @@ class PartEditor {
         <label class="pe-check"><input type="checkbox" data-k="through" ${f.through ? 'checked' : ''}/> Atravessar tudo</label>
         ${f.kind === 'simple' ? '' : `<div class="pe-row">${this.numField(f.kind === 'counterbore' ? 'Diâm. do rebaixo' : 'Diâm. do escareado', 'headDiameter', f.headDiameter)}${f.kind === 'counterbore' ? this.numField('Prof. do rebaixo', 'headDepth', f.headDepth) : ''}</div>`}`;
     }
-    const idx = this.part.features.indexOf(f);
     const earlierSketches = this.part.features.slice(0, idx).filter((x): x is SketchFeature => x.type === 'sketch');
     const sketchOpts = (k: string, cur: string) => sel(k, cur, earlierSketches.map((s) => [s.id, s.name]));
     if (f.type === 'sweep')
@@ -836,7 +977,7 @@ class PartEditor {
     if (f.type === 'loft')
       return `
         <div class="pe-field"><span>Esboços, na ordem (um contorno cada)</span>
-        ${earlierSketches.map((s) => `<label class="pe-check"><input type="checkbox" data-k="loft:${s.id}" ${f.sketches.includes(s.id) ? 'checked' : ''}/> ${esc(s.name)} <span class="hint">${PLANES[s.plane].label}, ${fmt(s.offset)} mm</span></label>`).join('')}</div>
+        ${earlierSketches.map((s) => `<label class="pe-check"><input type="checkbox" data-k="loft:${s.id}" ${f.sketches.includes(s.id) ? 'checked' : ''}/> ${esc(s.name)} <span class="hint">${esc(planeLabel(s.plane, this.part.features))}, ${fmt(s.offset)} mm</span></label>`).join('')}</div>
         <label class="pe-check"><input type="checkbox" data-k="ruled" ${f.ruled ? 'checked' : ''}/> Lados retos</label>
         <label class="pe-field"><span>Operação</span>${this.opSelect(f.op)}</label>`;
     if (f.type === 'thread') {
@@ -856,15 +997,15 @@ class PartEditor {
       <label class="pe-check"><input type="checkbox" data-k="src:" ${f.sources.length ? '' : 'checked'}/> A peça inteira</label>
       ${usable.map((x) => `<label class="pe-check"><input type="checkbox" data-k="src:${x.id}" ${f.sources.includes(x.id) ? 'checked' : ''}/> ${esc(x.name)}</label>`).join('')}</div>`;
     if (f.kind === 'mirror')
-      return `${srcs}<label class="pe-field"><span>Plano do espelho</span>${sel('plane', f.plane, (Object.keys(PLANES) as PlaneName[]).map((p) => [p, PLANES[p].label]))}</label>`;
+      return `${srcs}<label class="pe-field"><span>Plano do espelho</span>${sel('plane', f.plane, this.planeOpts(idx))}</label>`;
     if (f.kind === 'circular')
       return `${srcs}
-        <label class="pe-field"><span>Eixo de giro (pela origem)</span>${sel('axis', f.axis, axes)}</label>
+        <label class="pe-field"><span>Eixo de giro</span>${sel('axis', f.axis, axes)}</label>
         <div class="pe-row">${this.numField('Quantidade', 'count', f.count, '')}${this.numField('Ângulo total', 'angle', f.angle, '°')}</div>`;
     return `${srcs}
       <label class="pe-field"><span>Direção</span>${sel('axis', f.axis, axes)}</label>
       <div class="pe-row">${this.numField('Quantidade', 'count', f.count, '')}${this.numField('Espaço', 'spacing', f.spacing)}</div>
-      <label class="pe-field"><span>Segunda direção</span>${sel('axis2', f.axis2 ?? '', [['', 'Nenhuma'], ...axes])}</label>
+      <label class="pe-field"><span>Segunda direção</span>${sel('axis2', f.axis2 ?? '', [['', 'Nenhuma'], ['x', 'X'], ['y', 'Y'], ['z', 'Z (para cima)']])}</label>
       ${f.axis2 ? `<div class="pe-row">${this.numField('Quantidade', 'count2', f.count2, '')}${this.numField('Espaço', 'spacing2', f.spacing2)}</div>` : ''}`;
   }
 
@@ -880,7 +1021,7 @@ class PartEditor {
       ? `<div class="pe-dof ok">${icon('check', 14)} Esboço totalmente definido</div>`
       : `<div class="pe-dof">Faltam ${this.dof} ${this.dof === 1 ? 'grau' : 'graus'} de liberdade (use cotas e restrições)</div>`;
     return `
-      <div class="panel-title">${esc(s.name)} · ${PLANES[s.plane].label}</div>
+      <div class="panel-title">${esc(s.name)} · ${esc(planeLabel(s.plane, this.part.features))}</div>
       ${dof}
       <div class="pe-tools">${TOOLS.map((t) => `<button class="btn ${t.id === this.tool ? 'active' : ''}" data-tool="${t.id}" data-tip="${t.label} (${t.key})">${icon(t.id === 'select' ? 'cursor' : t.id, 18)}<span>${t.label}</span></button>`).join('')}</div>
       <div class="panel-title">Modificar</div>
@@ -967,6 +1108,26 @@ class PartEditor {
           return this.addModifier('thread');
         case 'import-step':
           return this.importStep();
+        case 'construct':
+          return showMenu(
+            [
+              { heading: 'Plano' },
+              { label: 'Deslocado de outro plano', icon: 'plane', action: () => this.addConstruction({ type: 'plane', kind: 'offset' }) },
+              { label: 'Em ângulo', icon: 'plane', action: () => this.addConstruction({ type: 'plane', kind: 'angle' }) },
+              { label: 'Por três pontos', icon: 'plane', action: () => this.addConstruction({ type: 'plane', kind: 'points' }) },
+              { label: 'Numa face da peça', icon: 'plane', action: () => this.addConstruction({ type: 'plane', kind: 'face' }) },
+              { heading: 'Eixo' },
+              { label: 'Eixo principal (X, Y, Z)', icon: 'axis', action: () => this.addConstruction({ type: 'axis', kind: 'world' }) },
+              { label: 'Por dois pontos', icon: 'axis', action: () => this.addConstruction({ type: 'axis', kind: 'points' }) },
+              { label: 'Numa aresta reta', icon: 'axis', action: () => this.addConstruction({ type: 'axis', kind: 'edge' }) },
+              { label: 'No centro de um furo ou pino', icon: 'axis', action: () => this.addConstruction({ type: 'axis', kind: 'cylinder' }) },
+              { heading: 'Ponto' },
+              { label: 'Ponto', icon: 'point', action: () => this.addConstruction({ type: 'point' }) },
+            ],
+            act,
+          );
+        case 'sketch-on':
+          return this.newSketch(id);
         case 'clear-picks': {
           const f = this.feature(this.selected);
           if (f?.type === 'fillet' || f?.type === 'chamfer') f.edges = [];
@@ -1005,12 +1166,23 @@ class PartEditor {
     this.selected = id;
     if (this.pickFeature !== was) this.changed();
     else this.renderSide();
+    this.drawConstruction();
   }
 
   /** The selected feature, when it is one that is set up by clicking the part. */
-  private get pickFeature(): EdgeFeature | ShellFeature | HoleFeature | ThreadFeature | null {
+  private get pickFeature(): EdgeFeature | ShellFeature | HoleFeature | ThreadFeature | PlaneFeature | AxisFeature | PointFeature | null {
     const f = this.sketchId ? null : this.feature(this.selected);
-    return f && (f.type === 'fillet' || f.type === 'chamfer' || f.type === 'shell' || f.type === 'hole' || f.type === 'thread') ? f : null;
+    if (!f) return null;
+    if (f.type === 'fillet' || f.type === 'chamfer' || f.type === 'shell' || f.type === 'hole' || f.type === 'thread' || f.type === 'point') return f;
+    if (f.type === 'plane' && f.kind === 'face') return f;
+    if (f.type === 'axis' && (f.kind === 'edge' || f.kind === 'cylinder')) return f;
+    return null;
+  }
+
+  /** Whether the selected feature is picked on an edge (not a face). */
+  private get picksEdges() {
+    const pf = this.pickFeature;
+    return !!pf && (pf.type === 'fillet' || pf.type === 'chamfer' || (pf.type === 'axis' && pf.kind === 'edge'));
   }
 
   private fieldChange(e: Event) {
@@ -1055,6 +1227,13 @@ class PartEditor {
     } else if (k === 'preset' && f.type === 'thread') {
       if (!val) return;
       f.pitch = Number(val);
+    } else if (k.startsWith('pt:') && (f.type === 'plane' || f.type === 'axis')) {
+      f.points[Number(k.slice(3))] = String(val);
+      f.points = Array.from({ length: f.type === 'plane' ? 3 : 2 }, (_, i) => f.points[i] ?? '');
+    } else if (k.startsWith('at.') && ((f.type === 'hole' && f.at) || f.type === 'point')) {
+      const n = num(String(val));
+      if (!Number.isFinite(n)) return this.renderSide();
+      (f as { at: V3 }).at[Number(k.slice(3))] = n;
     } else if (k.startsWith('at.') && f.type === 'hole' && f.at) {
       const n = num(String(val));
       if (!Number.isFinite(n)) return this.renderSide();
@@ -1371,16 +1550,32 @@ class PartEditor {
   // ---------- history ----------
 
   private planeMenu(anchor: HTMLElement) {
+    const hasSolid = !!this.solid.children.length;
     showMenu(
       [
         { heading: 'Novo esboço em' },
-        ...(Object.keys(PLANES) as PlaneName[]).map((p) => ({ label: PLANES[p].label, icon: 'sketch', action: () => this.newSketch(p) })),
+        ...this.planeOpts(this.part.features.length).map(([p, label]) => ({ label, icon: p in PLANES ? 'sketch' : 'plane', action: () => this.newSketch(p) })),
+        ...(hasSolid ? [{ label: 'Numa face da peça…', icon: 'plane', action: () => this.addConstruction({ type: 'plane', kind: 'face' }, true) }] : []),
       ],
       anchor,
     );
   }
 
-  private newSketch(plane: PlaneName) {
+  /** Construction plane/axis/point; with `thenSketch`, a sketch starts on the face once it is picked. */
+  private addConstruction(o: { type: 'plane'; kind: PlaneFeature['kind'] } | { type: 'axis'; kind: AxisFeature['kind'] } | { type: 'point' }, thenSketch = false) {
+    const base = { id: fid(), name: nextName(this.part, o.type) };
+    const pts = this.part.features.filter((x) => x.type === 'point').map((x) => x.id);
+    let f: ConstructionFeature;
+    if (o.type === 'plane') f = { ...base, type: 'plane', kind: o.kind, ref: 'XY', offset: 10, angle: 45, hinge: 'x', points: pts.slice(-3), face: null, flip: false };
+    else if (o.type === 'axis') f = { ...base, type: 'axis', kind: o.kind, world: 'z', points: pts.slice(-2), pick: null };
+    else f = { ...base, type: 'point', at: [0, 0, 0] };
+    this.part.features.push(f);
+    this.sketchAfterPick = thenSketch ? f.id : null;
+    this.select(f.id);
+    this.changed();
+  }
+
+  private newSketch(plane: string) {
     const s: SketchFeature = { id: fid(), type: 'sketch', name: nextName(this.part, 'sketch'), plane, offset: 0, entities: [] };
     this.part.features.push(s);
     this.selected = s.id;
@@ -1476,7 +1671,7 @@ class PartEditor {
   private deleteFeature(id: string) {
     const f = this.feature(id);
     if (!f) return;
-    const users = this.part.features.filter((x) => featureSketches(x).includes(id) || (x.type === 'pattern' && x.sources.includes(id)));
+    const users = this.part.features.filter((x) => featureRefs(x).includes(id));
     if (users.length) return toast(`“${f.name}” é usado por ${users.map((u) => `“${u.name}”`).join(', ')}. Apague essas operações antes.`, 'error', 4500);
     this.part.features = this.part.features.filter((x) => x.id !== id);
     if (this.selected === id) this.select(null);
@@ -1498,9 +1693,8 @@ class PartEditor {
     this.selEntity = null;
     this.selConstraint = null;
     this.dof = null;
-    const P = PLANES[s.plane];
-    const n = new THREE.Vector3(...P.n);
-    this.look(n, new THREE.Vector3(...P.y), n.clone().multiplyScalar(s.offset));
+    const P = this.frameOf(s);
+    this.look(new THREE.Vector3(...P.n), new THREE.Vector3(...P.y), new THREE.Vector3(...P.o));
     this.status.textContent = 'Desenhando o esboço. Botão direito gira a vista, o do meio arrasta.';
     this.status.classList.remove('warn');
     this.changed();
@@ -1552,17 +1746,23 @@ class PartEditor {
     const r = this.renderer.domElement.getBoundingClientRect();
     const ray = new THREE.Raycaster();
     ray.setFromCamera(new THREE.Vector2(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1), this.camera);
-    const P = PLANES[s.plane];
+    const P = this.frameOf(s);
     const n = new THREE.Vector3(...P.n);
-    const hit = ray.ray.intersectPlane(new THREE.Plane(n, -s.offset), new THREE.Vector3());
+    const o = new THREE.Vector3(...P.o);
+    const hit = ray.ray.intersectPlane(new THREE.Plane().setFromNormalAndCoplanarPoint(n, o), new THREE.Vector3());
     if (!hit) return null;
+    hit.sub(o);
     return [hit.dot(new THREE.Vector3(...P.x)), hit.dot(new THREE.Vector3(...P.y))];
+  }
+
+  /** Where a sketch lies (its construction plane as last built; the floor if unknown). */
+  private frameOf(s: SketchFeature): Frame {
+    return sketchFrame(s, this.refs) ?? sketchFrame({ plane: 'XY', offset: s.offset }, this.refs)!;
   }
 
   private toScreen(p: V2) {
     const s = this.sketchFeature!;
-    const P = PLANES[s.plane];
-    const w = new THREE.Vector3(...P.x).multiplyScalar(p[0]).add(new THREE.Vector3(...P.y).multiplyScalar(p[1])).add(new THREE.Vector3(...P.n).multiplyScalar(s.offset));
+    const w = new THREE.Vector3(...frameToWorld(this.frameOf(s), p));
     w.project(this.camera);
     const r = this.renderer.domElement.getBoundingClientRect();
     return [((w.x + 1) / 2) * r.width, ((1 - w.y) / 2) * r.height];
@@ -1949,9 +2149,9 @@ class PartEditor {
     const s = this.sketchFeature;
     this.drawMarks();
     if (!s) return;
-    const P = PLANES[s.plane];
+    const P = this.frameOf(s);
     const basis = new THREE.Matrix4().makeBasis(new THREE.Vector3(...P.x), new THREE.Vector3(...P.y), new THREE.Vector3(...P.n));
-    basis.setPosition(new THREE.Vector3(...P.n).multiplyScalar(s.offset));
+    basis.setPosition(new THREE.Vector3(...P.o));
     this.sketch.matrix.copy(basis);
     this.sketch.matrixWorldNeedsUpdate = true;
 
