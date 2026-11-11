@@ -65,12 +65,12 @@ const topbar = el(`
     </div>
     <div class="sep"></div>
     <div class="cluster">
-      <button class="btn" data-act="group" data-tip="Agrupar (Ctrl G)">${icon('group')}<span class="lbl">Agrupar</span></button>
+      <button class="btn icon-only" data-act="group" data-tip="Agrupar (Ctrl G)">${icon('group')}</button>
       <button class="btn icon-only" data-act="ungroup" data-tip="Desagrupar (Ctrl ⇧ G)">${icon('ungroup')}</button>
       <button class="btn icon-only" data-act="hole" data-tip="Furo / sólido (H)">${icon('hole')}</button>
       <button class="btn icon-only" data-act="align" data-tip="Alinhar">${icon('align')}</button>
       <button class="btn icon-only" data-act="mirror" data-tip="Espelhar">${icon('mirror')}</button>
-      <button class="btn icon-only" data-act="assembly" data-tip="Montagem: vista explodida, lista de peças e centro de massa">${icon('layers')}</button>
+      <button class="btn" data-act="assembly" data-tip="Montagem: vista explodida, lista de peças e centro de massa">${icon('layers')}<span class="lbl">Montagem</span></button>
     </div>
     <div class="spacer"></div>
     <div class="cluster">
@@ -88,8 +88,16 @@ const library = el(`
     <div class="lib-scroll">
       <div class="shape-grid"></div>
       <div class="lib-section">
-        <span class="panel-title">Projeto</span>
-        <button class="btn soft part-new" data-tip="Esboço 2D, extrusão e revolução com histórico editável">${icon('part', 18)}<span>Nova peça paramétrica</span></button>
+        <span class="panel-title">Peça paramétrica</span>
+        <button class="btn primary part-new" data-tip="Editor de peças com histórico editável, no estilo SolidWorks e Fusion 360">${icon('part', 18)}<span>Nova peça paramétrica</span></button>
+        <ul class="part-features">
+          <li>Esboço com restrições e medidas</li>
+          <li>Sólidos: extrudar, revolver, varrer, loft</li>
+          <li>Filete, chanfro, casca, furo, rosca</li>
+          <li>Superfícies e chapa metálica</li>
+          <li>Parâmetros e fórmulas</li>
+          <li>Montagem com juntas e movimento</li>
+        </ul>
       </div>
       <div class="lib-section">
         <span class="panel-title">Importar</span>
