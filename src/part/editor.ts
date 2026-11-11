@@ -66,6 +66,7 @@ import {
   type V3,
 } from './model';
 import { loadSolver, solveSketch } from './solver';
+import { NAME_RE, applyParams, constraintKey, evalWith, isPlainNumber, paramValues, usesOf } from './params';
 import { autoConstrain, corner, extend, offset, parseDxf, slot, trim } from './sketchOps';
 import { DEFAULT_FONT_ID, listFaces, loadFont, textToPolygons } from '../core/fonts';
 import './part.css';
@@ -133,6 +134,9 @@ const OPS: [BodyOp, string][] = [
   ['new', 'Corpo novo'],
 ];
 
+/** Feature number fields (they also take formulas). */
+const NUM_KEYS = ['offset', 'distance', 'angle', 'size', 'thickness', 'diameter', 'depth', 'headDiameter', 'headDepth', 'count', 'spacing', 'count2', 'spacing2', 'pitch', 'length', 'factor', 'turns', 'wire', 'wall', 'rot'];
+
 /** Features that make a solid from nothing (the first one starts the first body). */
 const MAKES_SOLID = ['extrude', 'revolve', 'sweep', 'loft', 'import', 'rib', 'pipe', 'coil'];
 
@@ -167,6 +171,8 @@ class PartEditor {
   private part: PartDef;
   private readonly original: string;
   private selected: string | null = null;
+  /** The parameters table is open in the side panel. */
+  private showParams = false;
   private errors = new Map<string, string>();
 
   // inspect
@@ -867,8 +873,12 @@ class PartEditor {
         ${btn('import-step', 'import', 'STEP', true)}
         ${btn('construct', 'plane', 'Referência', true)}
         ${btn('more-solid', 'combine', 'Mais', true)}
+        <button class="btn soft ${this.showParams ? 'active' : ''}" data-act="params">${icon('fx', 16)}<span>Parâmetros</span></button>
       </div>
-      ${sel ? `<div class="pe-params"><div class="panel-title">${esc(sel.name)}</div>${this.featureForm(sel)}</div>` : ''}`;
+      ${this.showParams ? this.paramsPanel() : sel ? `<div class="pe-params"><div class="panel-title pe-ftitle"><span>${esc(sel.name)}</span>
+        <button class="btn icon-only sm flip" data-act="move-up" data-id="${sel.id}" data-tip="Mover para cima no histórico" ${fs[0] === sel ? 'disabled' : ''}>${icon('chevron', 14)}</button>
+        <button class="btn icon-only sm" data-act="move-down" data-id="${sel.id}" data-tip="Mover para baixo no histórico" ${fs.at(-1) === sel ? 'disabled' : ''}>${icon('chevron', 14)}</button>
+      </div>${this.featureForm(sel)}</div>` : ''}`;
   }
 
   private sketchSelect(cur: string) {
@@ -882,7 +892,184 @@ class PartEditor {
   }
 
   private numField(label: string, k: string, v: number, unit = 'mm') {
-    return `<label class="pe-field"><span>${label}</span><span class="field"><input data-k="${k}" value="${fmt(v)}" inputmode="decimal"/><span class="unit">${unit}</span></span></label>`;
+    // A field driven by a formula shows the formula, with its value in the tip.
+    const owner = this.sketchId ?? this.selected ?? '';
+    const key = this.sketchId ? (k === 'cval' ? constraintKey(this.selConstraint ?? '') : '') : k;
+    const expr = key ? this.part.exprs?.[owner]?.[key] : undefined;
+    const value = expr ? esc(expr) : fmt(v);
+    return `<label class="pe-field"><span>${label}</span><span class="field ${expr ? 'fx' : ''}" ${expr ? `data-tip="= ${fmt(v)} ${unit}"` : ''}><input data-k="${k}" value="${value}" ${expr ? '' : 'inputmode="decimal"'}/><span class="unit">${expr ? 'fx' : unit}</span></span></label>`;
+  }
+
+  /**
+   * A typed number or formula for a field: formulas are remembered (and re-evaluated when the
+   * parameters change), plain numbers forget the formula. Null when the formula is broken.
+   */
+  private formulaInput(owner: string, key: string, text: string): number | null {
+    const all = (this.part.exprs ??= {});
+    if (isPlainNumber(text)) {
+      if (all[owner]) {
+        delete all[owner][key];
+        if (!Object.keys(all[owner]).length) delete all[owner];
+      }
+      return num(text);
+    }
+    try {
+      const v = evalWith(this.part, text);
+      (all[owner] ??= {})[key] = text.trim().replace(/^=/, '');
+      return Math.round(v * 1e6) / 1e6;
+    } catch (e) {
+      toast(`Fórmula: ${(e as Error).message}`, 'error', 4000);
+      return null;
+    }
+  }
+
+  // ---------- parameters ----------
+
+  private paramsPanel() {
+    const p = this.part;
+    const params = p.params ?? [];
+    const cfg = p.configs?.find((c) => c.id === p.config);
+    const { values, errors } = paramValues(p);
+    const rows = params
+      .map((x, i) => {
+        const over = cfg && x.name in cfg.values;
+        const shown = cfg?.values[x.name] ?? x.expr;
+        const res = errors[x.name] ? `<span class="err" data-tip="${esc(errors[x.name])}">${icon('warning', 14)}</span>` : `<span class="v">${fmt(values[x.name])}</span>`;
+        return `<div class="pe-prow">
+          <span class="field"><input data-k="p:name:${i}" value="${esc(x.name)}" spellcheck="false" aria-label="Nome"/></span>
+          <span class="field ${over ? 'over' : ''}" ${over ? 'data-tip="Valor só desta configuração. Apague o texto para voltar ao padrão."' : ''}><input data-k="p:expr:${i}" value="${esc(shown)}" spellcheck="false" aria-label="Valor ou fórmula"/></span>
+          ${res}
+          <button class="btn icon-only sm danger" data-act="param-del" data-id="${i}" data-tip="Apagar">${icon('trash', 14)}</button>
+        </div>`;
+      })
+      .join('');
+    const cfgOpts = [['', 'Padrão'], ...(p.configs ?? []).map((c) => [c.id, c.name])]
+      .map(([v, l]) => `<option value="${v}" ${v === (p.config ?? '') ? 'selected' : ''}>${esc(l)}</option>`)
+      .join('');
+    return `<div class="pe-params">
+      <div class="panel-title">Parâmetros</div>
+      <div class="pe-row" style="align-items:flex-end">
+        <label class="pe-field"><span>Configuração</span><select data-k="p:config">${cfgOpts}</select></label>
+        <button class="btn icon-only sm" data-act="cfg-add" data-tip="Nova configuração">${icon('plus', 15)}</button>
+        ${cfg ? `<button class="btn icon-only sm danger" data-act="cfg-del" data-tip="Apagar esta configuração">${icon('trash', 15)}</button>` : ''}
+      </div>
+      ${cfg ? `<label class="pe-field"><span>Nome da configuração</span><span class="field"><input data-k="p:cfgname" value="${esc(cfg.name)}"/></span></label>` : ''}
+      <div class="pe-prows">${rows || '<div class="hint">Nenhum parâmetro ainda.</div>'}</div>
+      <button class="btn soft wide" data-act="param-add">${icon('plus', 15)} Parâmetro</button>
+      <div class="hint"><span>Nos campos de medida (e nas cotas do esboço) digite uma fórmula, como “largura/2 + 1”. Funções: sin, cos, tan (graus), sqrt, abs, round, min, max; separe argumentos com ; (ex.: max(a; 3)).</span></div>
+    </div>`;
+  }
+
+  private async paramChange(k: string, val: string) {
+    const p = this.part;
+    const params = (p.params ??= []);
+    const cfg = p.configs?.find((c) => c.id === p.config);
+    if (k === 'config') {
+      p.config = val || undefined;
+    } else if (k === 'cfgname' && cfg) {
+      if (val.trim()) cfg.name = val.trim();
+      return this.renderSide();
+    } else if (k.startsWith('name:')) {
+      const x = params[Number(k.slice(5))];
+      const name = val.trim();
+      if (!x || name === x.name) return;
+      if (!NAME_RE.test(name)) {
+        toast('Nome inválido: use letras, números e _ (começando com letra).', 'error', 4000);
+        return this.renderSide();
+      }
+      if (params.some((o) => o.name === name)) {
+        toast(`Já existe um parâmetro “${name}”.`, 'error');
+        return this.renderSide();
+      }
+      // Rename it in every formula that uses it.
+      const re = new RegExp(`(^|[^\\wÀ-ÿ])${x.name}(?![\\wÀ-ÿ])`, 'g');
+      const ren = (e: string) => e.replace(re, `$1${name}`);
+      for (const o of params) o.expr = ren(o.expr);
+      for (const c of p.configs ?? []) {
+        if (x.name in c.values) {
+          c.values[name] = c.values[x.name];
+          delete c.values[x.name];
+        }
+        for (const n of Object.keys(c.values)) c.values[n] = ren(c.values[n]);
+      }
+      for (const fields of Object.values(p.exprs ?? {})) for (const key of Object.keys(fields)) fields[key] = ren(fields[key]);
+      x.name = name;
+    } else if (k.startsWith('expr:')) {
+      const x = params[Number(k.slice(5))];
+      if (!x) return;
+      if (cfg) {
+        if (!val.trim() || val.trim() === x.expr) delete cfg.values[x.name];
+        else cfg.values[x.name] = val.trim();
+      } else if (val.trim()) x.expr = val.trim();
+      else return this.renderSide();
+    }
+    await this.applyParams();
+  }
+
+  /** Push the parameter values into every formula field, solve the sketches that changed and rebuild. */
+  private async applyParams() {
+    const { changed, errors } = applyParams(this.part);
+    for (const f of changed) {
+      if (f.type === 'sketch') {
+        const r = await solveSketch(f);
+        if (!r.ok) toast(`“${f.name}” não fecha com esses valores (restrições em conflito).`, 'error', 4500);
+      } else if (f.type === 'emboss') {
+        try {
+          f.outline = await textOutline(f.text, f.font, f.size);
+        } catch {
+          /* keep the old outline */
+        }
+      }
+    }
+    if (errors.length) {
+      const e = errors[0];
+      toast(`${this.feature(e.feature)?.name ?? 'Fórmula'}: ${e.message}`, 'error', 4500);
+    }
+    this.changed();
+  }
+
+  private paramAction(act: string, id: string) {
+    const p = this.part;
+    const params = (p.params ??= []);
+    if (act === 'param-add') {
+      let n = params.length + 1;
+      while (params.some((x) => x.name === `p${n}`)) n++;
+      params.push({ name: `p${n}`, expr: '10' });
+      return this.renderSide();
+    }
+    if (act === 'param-del') {
+      const x = params[Number(id)];
+      if (!x) return;
+      const uses = usesOf(p, x.name);
+      if (uses) return toast(`“${x.name}” é usado em ${uses} ${uses === 1 ? 'fórmula' : 'fórmulas'}. Troque essas fórmulas antes.`, 'error', 4500);
+      params.splice(Number(id), 1);
+      for (const c of p.configs ?? []) delete c.values[x.name];
+      return this.renderSide();
+    }
+    if (act === 'cfg-add') {
+      const list = (p.configs ??= []);
+      const c = { id: fid(), name: `Configuração ${list.length + 1}`, values: {} };
+      list.push(c);
+      p.config = c.id;
+      return void this.applyParams();
+    }
+    if (act === 'cfg-del') {
+      p.configs = (p.configs ?? []).filter((c) => c.id !== p.config);
+      p.config = undefined;
+      return void this.applyParams();
+    }
+  }
+
+  /** Swap a feature with its neighbour, unless one of them uses the other. */
+  private moveFeature(id: string, dir: -1 | 1) {
+    const fs = this.part.features;
+    const i = fs.findIndex((f) => f.id === id);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= fs.length) return;
+    const [a, b] = i < j ? [fs[i], fs[j]] : [fs[j], fs[i]];
+    if (featureRefs(b).includes(a.id)) return toast(`“${b.name}” usa “${a.name}”: não dá para trocar a ordem.`, 'error', 4000);
+    [fs[i], fs[j]] = [fs[j], fs[i]];
+    this.changed();
   }
 
   /** Main planes and the construction planes before position `idx` of the history. */
@@ -1007,7 +1194,7 @@ class PartEditor {
           <label class="pe-field"><span>Em volta do ponto</span>${sel('point', f.point, [['', 'Origem'], ...this.pointOpts(idx).slice(1)])}</label>`;
       case 'move':
         return `
-          <div class="pe-row">${this.numField('X', 'off.0', f.offset[0])}${this.numField('Y', 'off.1', f.offset[1])}${this.numField('Z', 'off.2', f.offset[2])}</div>
+          <div class="pe-row">${this.numField('X', 'offset.0', f.offset[0])}${this.numField('Y', 'offset.1', f.offset[1])}${this.numField('Z', 'offset.2', f.offset[2])}</div>
           <div class="pe-row">${this.numField('Girar', 'angle', f.angle, '°')}<label class="pe-field"><span>Em volta de</span>${sel('axis', f.axis, axes)}</label></div>
           <label class="pe-check"><input type="checkbox" data-k="copy" ${f.copy ? 'checked' : ''}/> Copiar (vira um corpo novo)</label>
           <div class="hint">Move o último corpo feito.</div>`;
@@ -1260,6 +1447,17 @@ class PartEditor {
             act,
           );
         }
+        case 'params':
+          this.showParams = !this.showParams;
+          return this.renderSide();
+        case 'param-add':
+        case 'param-del':
+        case 'cfg-add':
+        case 'cfg-del':
+          return this.paramAction(act.dataset.act, id);
+        case 'move-up':
+        case 'move-down':
+          return this.moveFeature(id, act.dataset.act === 'move-up' ? -1 : 1);
         case 'sketch-on':
           return this.newSketch(id);
         case 'clear-picks': {
@@ -1298,6 +1496,7 @@ class PartEditor {
   private select(id: string | null) {
     const was = this.pickFeature;
     this.selected = id;
+    if (id) this.showParams = false;
     if (this.pickFeature !== was) this.changed();
     else this.renderSide();
     this.drawConstruction();
@@ -1326,9 +1525,10 @@ class PartEditor {
     const t = e.target as HTMLInputElement | HTMLSelectElement;
     const k = t.dataset.k;
     if (!k) return;
-    const val = t instanceof HTMLInputElement && t.type === 'checkbox' ? t.checked : t.value;
+    const val0 = t instanceof HTMLInputElement && t.type === 'checkbox' ? t.checked : t.value;
 
     if (this.sketchId) {
+      const val = val0;
       if (k === 'grid') this.gridStep = Number(val);
       else if (k === 'sides') this.polygonSides = Math.max(3, Math.min(64, Math.round(num(String(val))) || 6));
       else if (k === 'modsize') {
@@ -1344,13 +1544,22 @@ class PartEditor {
         else if (k === 'img.c.1') img.c[1] = n;
         return this.changed();
       }
-      else if (k === 'cval') return void this.editConstraintValue(num(String(val)));
-      else return void this.editEntity(k, val);
+      else if (k === 'cval') {
+        const n = this.formulaInput(this.sketchId, constraintKey(this.selConstraint ?? ''), String(val));
+        return n === null ? this.renderSide() : void this.editConstraintValue(n);
+      } else return void this.editEntity(k, val);
       return this.renderSide();
     }
 
+    if (k.startsWith('p:')) return void this.paramChange(k.slice(2), String(val0));
     const f = this.feature(this.selected);
     if (!f) return;
+    let val = val0;
+    if (typeof val === 'string' && (NUM_KEYS.includes(k) || /^(at|offset)\.\d$/.test(k))) {
+      const n = this.formulaInput(f.id, k, val);
+      if (n === null) return this.renderSide();
+      val = String(n);
+    }
     const rec = f as unknown as Record<string, unknown>;
     if (k.startsWith('src:') && f.type === 'pattern') {
       const id = k.slice(4);
@@ -1367,10 +1576,10 @@ class PartEditor {
     } else if (k === 'target' && f.type === 'combine') {
       f.target = String(val);
       f.tools = f.tools.filter((x) => x !== f.target);
-    } else if (k.startsWith('off.') && f.type === 'move') {
+    } else if (k.startsWith('offset.') && f.type === 'move') {
       const n = num(String(val));
       if (!Number.isFinite(n)) return this.renderSide();
-      f.offset[Number(k.slice(4))] = n;
+      f.offset[Number(k.slice(7))] = n;
     } else if (k === 'engrave' && f.type === 'emboss') f.engrave = !!val;
     else if (f.type === 'emboss' && (k === 'text' || k === 'font' || k === 'size')) {
       const patch = { text: f.text, font: f.font, size: f.size, [k]: k === 'size' ? num(String(val)) : String(val) };
@@ -1396,7 +1605,7 @@ class PartEditor {
       if (!Number.isFinite(n)) return this.renderSide();
       f.at[Number(k.slice(3))] = n;
     } else if (typeof val === 'boolean') rec[k] = val;
-    else if (['offset', 'distance', 'angle', 'size', 'thickness', 'diameter', 'depth', 'headDiameter', 'headDepth', 'count', 'spacing', 'count2', 'spacing2', 'pitch', 'length', 'factor', 'turns', 'wire', 'wall', 'rot'].includes(k)) {
+    else if (NUM_KEYS.includes(k)) {
       const n = num(val);
       if (!Number.isFinite(n)) return this.renderSide();
       rec[k] = n;

@@ -80,3 +80,17 @@
 .pe-mark.dim { color: var(--text); font-size: 12px; padding: 1px 6px; }
 .pe-mark:hover { border-color: var(--accent); }
 .pe-mark.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* Parameters and formulas */
+.pe-ftitle { display: flex; align-items: center; gap: 4px; }
+.pe-ftitle > span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.btn.flip svg { transform: rotate(180deg); }
+.pe-prows { display: flex; flex-direction: column; gap: 6px; }
+.pe-prow { display: grid; grid-template-columns: 1fr 1.4fr 52px auto; gap: 6px; align-items: center; }
+.pe-prow .field { display: flex; min-width: 0; }
+.pe-prow .field input { flex: 1; min-width: 0; }
+.pe-prow .field.over { border-color: var(--accent); }
+.pe-prow .v { font-size: 12px; color: var(--text-2); text-align: right; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; }
+.pe-prow .err { color: var(--warn, #e5a100); text-align: right; }
+.pe-field .field.fx input { color: var(--accent); font-family: ui-monospace, monospace; font-size: 12px; }
+.pe-field .field.fx .unit { color: var(--accent); font-style: italic; }

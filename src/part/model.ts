@@ -590,6 +590,13 @@ export function axisOf(ref: string, refs: Refs): AxisLine | null {
 export interface PartDef {
   version: 1;
   features: Feature[];
+  /** Named values with formulas (see params.ts). */
+  params?: { name: string; expr: string }[];
+  /** Parameter overrides by name, and the active one (none = the parameters as written). */
+  configs?: { id: string; name: string; values: Record<string, string> }[];
+  config?: string;
+  /** Number fields driven by formulas: feature id → field key → formula. */
+  exprs?: Record<string, Record<string, string>>;
 }
 
 export const emptyPart = (): PartDef => ({ version: 1, features: [] });
