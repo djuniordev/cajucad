@@ -463,7 +463,58 @@ export interface ThickenFeature {
   thickness: number;
 }
 
-export type SurfaceOpFeature = SurfaceFeature | FillFeature | StitchFeature | TrimFeature | ThickenFeature;
+/** Sheet metal plate from a closed sketch; later flanges and bends take its thickness and K factor. */
+export interface SheetFeature {
+  id: string;
+  type: 'sheet';
+  name: string;
+  sketch: string;
+  thickness: number;
+  /** Default inside bend radius for flanges and bends. */
+  radius: number;
+  /** Where the neutral line sits across the thickness (0..1), for the flat length of bends. */
+  kfactor: number;
+  reverse: boolean;
+  op: BodyOp;
+}
+
+/** Wall bent up from a straight edge of the sheet. */
+export interface FlangeFeature {
+  id: string;
+  type: 'flange';
+  name: string;
+  edge: V3 | null;
+  length: number;
+  angle: number;
+  radius: number;
+  /** Bend to the other side of the sheet. */
+  flip: boolean;
+}
+
+/** Bend the sheet along the line of a sketch drawn on it. */
+export interface BendFeature {
+  id: string;
+  type: 'bend';
+  name: string;
+  sketch: string;
+  angle: number;
+  radius: number;
+  flip: boolean;
+  /** Which side of the line moves. */
+  side: boolean;
+}
+
+/** Show (and print) the sheet unfolded: bends and flanges before it are laid flat. */
+export interface FlattenFeature {
+  id: string;
+  type: 'flatten';
+  name: string;
+  on: boolean;
+}
+
+export type SheetMetalFeature = SheetFeature | FlangeFeature | BendFeature | FlattenFeature;
+
+export type SurfaceOpFeature =SurfaceFeature | FillFeature | StitchFeature | TrimFeature | ThickenFeature;
 
 export type SolidModFeature =DraftFeature | RibFeature | PipeFeature | CoilFeature | EmbossFeature | SplitFeature | PushPullFeature | ScaleFeature | MoveFeature | CombineFeature;
 
@@ -525,7 +576,8 @@ export type Feature =
   | ImportFeature
   | ConstructionFeature
   | SolidModFeature
-  | SurfaceOpFeature;
+  | SurfaceOpFeature
+  | SheetMetalFeature;
 
 /** Sketches a feature is built from. */
 export function featureSketches(f: Feature): string[] {
@@ -534,7 +586,7 @@ export function featureSketches(f: Feature): string[] {
   if (f.type === 'loft') return f.sketches;
   if (f.type === 'rib') return [f.sketch];
   if (f.type === 'pipe') return [f.path];
-  if (f.type === 'surface') return [f.sketch];
+  if (f.type === 'surface' || f.type === 'sheet' || f.type === 'bend') return [f.sketch];
   return [];
 }
 
@@ -700,6 +752,7 @@ export const featureLabel: Record<Feature['type'], string> = {
   sweep: 'Varredura', loft: 'Loft', thread: 'Rosca', import: 'Importado', plane: 'Plano', axis: 'Eixo', point: 'Ponto',
   draft: 'Ângulo de saída', rib: 'Nervura', pipe: 'Cano', coil: 'Mola', emboss: 'Gravação', split: 'Divisão', pushpull: 'Empurrar/puxar', scale: 'Escala',
   move: 'Mover', combine: 'Combinar',
+  sheet: 'Chapa', flange: 'Aba', bend: 'Dobra', flatten: 'Planificação',
   surface: 'Superfície', fill: 'Remendo', stitch: 'Costura', trim: 'Aparar', thicken: 'Espessar',
 };
 

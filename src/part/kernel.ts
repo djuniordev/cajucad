@@ -39,6 +39,11 @@ import {
   type CoilFeature,
   type EmbossFeature,
   type SurfaceFeature,
+  type FlangeFeature,
+  type BendFeature,
+  type Feature,
+  type SketchEntity,
+  frameToWorld,
   type ThreadFeature,
   type PartDef,
   type PatternFeature,
@@ -422,13 +427,59 @@ export interface Body {
   shape: Shape3D;
 }
 
+type Built = BuildResult & { shape: Shape3D | null; edges?: number[][]; refs: Refs; bodies: string[]; surfaces: string[] };
+
 /** Rebuild the whole history. Stops at the first failing feature and keeps what was built before it. */
-export async function buildPart(
-  part: PartDef,
-  opts: BuildOptions = {},
-): Promise<BuildResult & { shape: Shape3D | null; edges?: number[][]; refs: Refs; bodies: string[]; surfaces: string[] }> {
+export async function buildPart(part: PartDef, opts: BuildOptions = {}): Promise<Built> {
   const rc = await loadKernel();
+  const fl = part.features.findIndex((f) => f.type === 'flatten' && f.on);
+  const stop = opts.before ? part.features.findIndex((f) => f.id === opts.before) : -1;
+  if (fl < 0 || (stop >= 0 && stop <= fl)) return buildCore(rc, part, opts, null);
+  // Points picked on the folded sheet are unfolded with the folds of a folded build first.
+  const folds: Fold[] = [];
+  const pre = await buildCore(rc, { ...part, features: part.features.slice(0, fl) }, {}, { until: -1, folds });
+  if (pre.error) return { ...pre, mesh: null, shape: null, bodies: [], surfaces: [] };
+  return buildCore(rc, part, opts, { until: fl, folds });
+}
+
+/** What a bend or flange did, to lay points picked on the folded sheet flat again. */
+interface Fold {
+  id: string;
+  /** Edge point on the inside face, sheet across (unit), bend side normal and bend axis direction. */
+  P: V3;
+  U: V3;
+  Nb: V3;
+  w: V3;
+  /** Bend centre is P + Nb·c; inside radius, thickness, angle (degrees) and flat length of the bend. */
+  c: number;
+  r: number;
+  t: number;
+  angle: number;
+  ba: number;
+}
+
+/** Folded → flat position of a point. */
+function unfold(F: Fold, q: V3): V3 {
+  const eps = 0.05;
+  const d = v3.sub(q, F.P);
+  const u = v3.dot(d, F.U), v = v3.dot(d, F.Nb), wv = v3.dot(d, F.w);
+  const th = (F.angle * Math.PI) / 180;
+  const R = Math.hypot(u, F.c - v);
+  const phi = Math.atan2(u, F.c - v);
+  const world = (uu: number, vv: number) => v3.add(F.P, v3.add(v3.mul(F.U, uu), v3.add(v3.mul(F.Nb, vv), v3.mul(F.w, wv))));
+  if (R >= F.r - eps && R <= F.r + F.t + eps && phi >= -eps && phi <= th + eps && u > -eps) return world((Math.max(0, phi) / th) * F.ba, F.c - R);
+  const lo = F.c - F.r - F.t, hi = F.c - F.r;
+  if (u <= eps && v >= lo - eps && v <= hi + eps) return q;
+  const C = v3.add(F.P, v3.mul(F.Nb, F.c));
+  const back = v3.add(C, v3.rotate(v3.sub(q, C), F.w, -F.angle));
+  if (v3.dot(v3.sub(back, F.P), F.U) >= -eps) return v3.add(back, v3.mul(F.U, F.ba));
+  return q;
+}
+
+async function buildCore(rc: Replicad, part: PartDef, opts: BuildOptions, flat: { until: number; folds: Fold[] } | null): Promise<Built> {
   refs = emptyRefs();
+  // Sheet metal in effect: thickness, default bend radius, K factor.
+  let sheet: { t: number; r: number; k: number } | null = null;
   const sketches = new Map<string, SketchFeature>();
   // Solids each feature added or removed, for patterns.
   const tools = new Map<string, { tool: Shape3D; op: BodyOp }>();
@@ -452,10 +503,37 @@ export async function buildPart(
       cur = bodies.length - 1;
     } else set(combine(bodies[cur].shape, tool.clone(), op));
   };
-  for (const f of part.features) {
-    if (f.id === opts.before) break;
+  for (const [fi, f0] of part.features.entries()) {
+    if (f0.id === opts.before) break;
+    const flatNow = !!flat && fi < flat.until;
+    const f = flatNow ? unfoldPicks(f0, flat!.folds.filter((x) => part.features.findIndex((g) => g.id === x.id) < fi)) : f0;
     try {
       switch (f.type) {
+        case 'sheet': {
+          if (!(f.thickness > 0)) throw new Error('A espessura precisa ser maior que zero.');
+          if (!(f.radius >= 0)) throw new Error('O raio de dobra não pode ser negativo.');
+          if (!(f.kfactor >= 0 && f.kfactor <= 1)) throw new Error('O fator K fica entre 0 e 1.');
+          sheet = { t: f.thickness, r: f.radius, k: f.kfactor };
+          const plate = featureSolid(rc, { id: f.id, type: 'extrude', name: f.name, sketch: f.sketch, distance: f.thickness, symmetric: false, reverse: f.reverse, op: f.op }, sketches);
+          add(f.id, plate, f.op);
+          break;
+        }
+        case 'flange': {
+          const body = need('fazer a aba', f.edge);
+          const out = flangeOn(rc, body, f, sheet, flatNow);
+          set(out.shape);
+          if (flat && flat.until < 0) flat.folds.push(out.fold);
+          break;
+        }
+        case 'bend': {
+          const body = need('dobrar');
+          const out = bendOn(rc, body, f, sheet, sketches, flatNow);
+          set(out.shape);
+          if (flat && flat.until < 0) flat.folds.push(out.fold);
+          break;
+        }
+        case 'flatten':
+          break;
         case 'sketch':
           sketches.set(f.id, f);
           break;
@@ -696,6 +774,105 @@ export async function buildPart(
     }
   }
   return { shape, mesh, error, edges, refs, bodies: bodies.map((b) => b.id), surfaces };
+}
+
+/** Points picked on the folded sheet, laid flat (newest fold first). */
+function unfoldPicks<T extends Feature>(f: T, folds: Fold[]): T {
+  if (!folds.length) return f;
+  const m = (p: V3 | null) => (p ? [...folds].reverse().reduce((q, F) => unfold(F, q), p) : p);
+  const g = structuredClone(f) as Feature;
+  if (g.type === 'flange') g.edge = m(g.edge);
+  else if (g.type === 'fillet' || g.type === 'chamfer' || g.type === 'fill') g.edges = g.edges.map((p) => m(p)!);
+  else if (g.type === 'shell' || g.type === 'draft') g.faces = g.faces.map((p) => m(p)!);
+  else if (g.type === 'thread' || g.type === 'emboss' || g.type === 'pushpull' || g.type === 'plane') g.face = m(g.face);
+  else if (g.type === 'axis') g.pick = m(g.pick);
+  else if (g.type === 'hole' && g.at) {
+    const a = m(g.at)!;
+    g.n = v3.unit(v3.sub(m(v3.add(g.at, v3.mul(g.n, 0.01)))!, a));
+    g.at = a;
+  }
+  return g as T;
+}
+
+/** The thin end face at a picked straight edge of a sheet, and the faces' directions there. */
+function sheetEdge(rc: Replicad, body: Shape3D, at: V3) {
+  const [edge] = findNear(rc, body, body.edges, [at], 'arestas');
+  if (edge.geomType !== 'LINE') throw new Error('A aba vai numa aresta reta.');
+  const a0 = edge.startPoint, b0 = edge.endPoint;
+  const A: V3 = [a0.x, a0.y, a0.z], B: V3 = [b0.x, b0.y, b0.z];
+  const mid = v3.mul(v3.add(A, B), 0.5);
+  const vm = rc.makeVertex(mid);
+  const faces = body.faces.filter((f) => f.geomType === 'PLANE' && rc.measureDistanceBetween(f, vm) < 1e-4);
+  if (faces.length !== 2) throw new Error('Escolha uma aresta da borda da chapa (entre a face grande e a lateral fina).');
+  const [side, big] = [...faces].sort((x, y) => rc.measureArea(x) - rc.measureArea(y));
+  const nrm = (f: Face): V3 => {
+    const n = f.normalAt(mid);
+    return [n.x, n.y, n.z];
+  };
+  const U = nrm(side), N = nrm(big);
+  if (Math.abs(v3.dot(U, N)) > 1e-3) throw new Error('A lateral da chapa precisa ser reta (90°) nessa aresta.');
+  const len = v3.len(v3.sub(B, A));
+  return { side, A, B, U, N, t: rc.measureArea(side) / len };
+}
+
+/** Bend frame shared by flanges and bends. */
+function foldFrame(id: string, A: V3, B: V3, U: V3, N: V3, t: number, r: number, angle: number, k: number, flip: boolean): Fold {
+  const Nb = flip ? v3.mul(N, -1) : N;
+  const w = v3.cross(U, Nb);
+  const P = v3.dot(v3.sub(B, A), w) >= 0 ? A : B;
+  return { id, P, U, Nb, w, c: flip ? t + r : r, r, t, angle, ba: ((angle * Math.PI) / 180) * (r + k * t) };
+}
+
+function flangeOn(rc: Replicad, body: Shape3D, f: FlangeFeature, sheet: { t: number; r: number; k: number } | null, flat: boolean) {
+  if (!f.edge) throw new Error('Clique numa aresta da borda da chapa.');
+  if (!(f.length > 0)) throw new Error('O comprimento precisa ser maior que zero.');
+  if (!(f.angle > 0 && f.angle <= 180)) throw new Error('O ângulo fica entre 0 e 180°.');
+  if (!(f.radius >= 0)) throw new Error('O raio de dobra não pode ser negativo.');
+  const e = sheetEdge(rc, body, f.edge);
+  const fold = foldFrame(f.id, e.A, e.B, e.U, e.N, e.t, f.radius, f.angle, sheet?.k ?? 0.44, f.flip);
+  if (flat) return { shape: body.fuse(rc.basicFaceExtrusion(e.side, new rc.Vector(v3.mul(e.U, fold.ba + f.length)))), fold };
+  const C = v3.add(fold.P, v3.mul(fold.Nb, fold.c));
+  const out = body.fuse(rc.revolution(e.side.clone(), C, fold.w, f.angle));
+  const end = e.side.clone().rotate(f.angle, C, fold.w) as Face;
+  const d = v3.rotate(e.U, fold.w, f.angle);
+  return { shape: out.fuse(rc.basicFaceExtrusion(end, new rc.Vector(v3.mul(d, f.length)))), fold };
+}
+
+function bendOn(rc: Replicad, body: Shape3D, f: BendFeature, sheet: { t: number; r: number; k: number } | null, sketches: Map<string, SketchFeature>, flat: boolean) {
+  if (!sheet) throw new Error('A dobra é para chapas: comece a peça com “Chapa”.');
+  const s = sketches.get(f.sketch);
+  if (!s) throw new Error('O esboço da linha de dobra foi apagado ou vem depois da dobra.');
+  const lines = s.entities.filter((e): e is Extract<SketchEntity, { t: 'line' }> => e.t === 'line' && !e.construction);
+  if (lines.length !== 1) throw new Error(`“${s.name}” precisa ter uma linha só (a linha de dobra).`);
+  if (!(f.angle > 0 && f.angle <= 180)) throw new Error('O ângulo fica entre 0 e 180°.');
+  if (!(f.radius >= 0)) throw new Error('O raio de dobra não pode ser negativo.');
+  const fr = frameFor(s);
+  const A = frameToWorld(fr, lines[0].a), B = frameToWorld(fr, lines[0].b);
+  // The line lies on a face of the sheet; that face's outward normal is "up".
+  const mid = v3.mul(v3.add(A, B), 0.5);
+  const [face] = findNear(rc, body, body.faces, [mid], 'faces');
+  if (face.geomType !== 'PLANE' || rc.measureDistanceBetween(face, rc.makeVertex(mid)) > 1e-3) throw new Error('Desenhe a linha de dobra sobre uma face plana da chapa.');
+  const nv = face.normalAt(mid);
+  const N: V3 = [nv.x, nv.y, nv.z];
+  const along = v3.unit(v3.sub(B, A));
+  let U = v3.unit(v3.cross(along, N));
+  if (f.side) U = v3.mul(U, -1);
+  const fold = foldFrame(f.id, A, B, U, N, sheet.t, f.radius, f.angle, sheet.k, f.flip);
+  if (flat) return { shape: body, fold };
+  const cut = (o: V3) => new rc.Plane(o, fold.w, U);
+  const halves = body.split(cut(fold.P));
+  if (!halves.negative || !halves.positive) throw new Error('A linha de dobra não atravessa a chapa.');
+  const fixed = halves.negative as Shape3D;
+  // The strip that becomes the bend is taken out, so the flat length stays the same.
+  const rest = (halves.positive as Shape3D).split(cut(v3.add(fold.P, v3.mul(U, fold.ba))));
+  if (!rest.positive) throw new Error('A dobra é maior que o lado que dobra.');
+  const C = v3.add(fold.P, v3.mul(fold.Nb, fold.c));
+  const moving = (rest.positive as Shape3D).translate(v3.mul(U, -fold.ba)).rotate(f.angle, C, fold.w);
+  // The bend itself: the cut section of the fixed side turned around the bend axis.
+  let out: Shape3D = fixed;
+  for (const sec of fixed.faces.filter((x) => x.geomType === 'PLANE' && Math.abs(v3.dot(v3.sub([x.center.x, x.center.y, x.center.z], fold.P), U)) < 1e-4))
+    out = out.fuse(rc.revolution(sec.clone(), C, fold.w, f.angle));
+  return { shape: out.fuse(moving), fold };
 }
 
 /** Whether a body encloses volume (as opposed to a surface with no thickness). */

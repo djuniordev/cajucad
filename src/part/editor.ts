@@ -56,6 +56,9 @@ import {
   type PushPullFeature,
   type SolidModFeature,
   type FillFeature,
+  type FlangeFeature,
+  type SheetFeature,
+  type SheetMetalFeature,
   type SurfaceFeature,
   type SurfaceOpFeature,
   type PartDef,
@@ -141,10 +144,10 @@ const OPS: [BodyOp, string][] = [
 type NewFeature<T> = T extends unknown ? Omit<T, 'id' | 'name'> : never;
 
 /** Feature number fields (they also take formulas). */
-const NUM_KEYS = ['offset', 'distance', 'angle', 'size', 'thickness', 'diameter', 'depth', 'headDiameter', 'headDepth', 'count', 'spacing', 'count2', 'spacing2', 'pitch', 'length', 'factor', 'turns', 'wire', 'wall', 'rot'];
+const NUM_KEYS = ['offset', 'distance', 'angle', 'size', 'thickness', 'diameter', 'depth', 'headDiameter', 'headDepth', 'count', 'spacing', 'count2', 'spacing2', 'pitch', 'length', 'factor', 'turns', 'wire', 'wall', 'rot', 'radius', 'kfactor'];
 
 /** Features that make a solid from nothing (the first one starts the first body). */
-const MAKES_SOLID = ['extrude', 'revolve', 'sweep', 'loft', 'import', 'rib', 'pipe', 'coil'];
+const MAKES_SOLID = ['extrude', 'revolve', 'sweep', 'loft', 'import', 'rib', 'pipe', 'coil', 'sheet'];
 
 const css = (name: string) => getComputedStyle(document.documentElement).getPropertyValue(name).trim() || '#888';
 const r2 = (v: number) => Math.round(v * 100) / 100;
@@ -424,7 +427,9 @@ class PartEditor {
                     ? 'Clique na peça para pôr o ponto ali, ou digite as coordenadas.'
                     : pf.type === 'draft'
                       ? 'Clique nas faces que vão inclinar. Esc mostra o resultado.'
-                      : pf.type === 'fill'
+                      : pf.type === 'flange'
+                        ? 'Clique na aresta da borda da chapa onde vai a aba. Esc mostra o resultado.'
+                        : pf.type === 'fill'
                         ? 'Clique nas arestas que contornam o buraco. Esc mostra o resultado.'
                         : pf.type === 'emboss' || pf.type === 'pushpull'
                         ? 'Clique numa face plana da peça. Esc mostra o resultado.'
@@ -545,6 +550,7 @@ class PartEditor {
     } else if ((pf.type === 'thread' || pf.type === 'emboss' || pf.type === 'pushpull') && hit.point) pf.face = hit.point;
     else if (pf.type === 'plane' && hit.point) pf.face = hit.point;
     else if (pf.type === 'axis' && pf.kind === 'edge' && hit.edge != null) pf.pick = this.edgeMid(hit.edge);
+    else if (pf.type === 'flange' && hit.edge != null) pf.edge = this.edgeMid(hit.edge);
     else if (pf.type === 'axis' && hit.point) pf.pick = hit.point;
     else if (pf.type === 'point' && hit.point) pf.at = this.snapVertex(hit.point);
     this.hoverPick = null;
@@ -610,9 +616,10 @@ class PartEditor {
       const chosen = new Set(pf.edges.map((p) => this.edgeNear(p)));
       for (const i of chosen) if (i >= 0) thick(this.pickEdges[i], accent, 4);
       if (hov?.edge != null && !chosen.has(hov.edge)) thick(this.pickEdges[hov.edge], accent, 3, 0.55);
-    } else if (pf.type === 'axis' && pf.kind === 'edge') {
+    } else if ((pf.type === 'axis' && pf.kind === 'edge') || pf.type === 'flange') {
       if (!this.pickEdges) return;
-      const chosen = pf.pick ? this.edgeNear(pf.pick) : -1;
+      const at = pf.type === 'flange' ? pf.edge : pf.pick;
+      const chosen = at ? this.edgeNear(at) : -1;
       if (chosen >= 0) thick(this.pickEdges[chosen], accent, 4);
       if (hov?.edge != null && hov.edge !== chosen) thick(this.pickEdges[hov.edge], accent, 3, 0.55);
     } else if (pf.type === 'thread' || pf.type === 'plane' || pf.type === 'axis' || pf.type === 'emboss' || pf.type === 'pushpull') {
@@ -885,6 +892,7 @@ class PartEditor {
         ${btn('construct', 'plane', 'Referência', true)}
         ${btn('more-solid', 'combine', 'Mais', true)}
         ${btn('surfaces', 'surface', 'Superfície', true)}
+        ${btn('sheetmetal', 'sheet', 'Chapa', true)}
         <button class="btn soft ${this.showParams ? 'active' : ''}" data-act="params">${icon('fx', 16)}<span>Parâmetros</span></button>
       </div>
       ${this.showParams ? this.paramsPanel() : sel ? `<div class="pe-params"><div class="panel-title pe-ftitle"><span>${esc(sel.name)}</span>
@@ -1360,6 +1368,31 @@ class PartEditor {
     }
     if (f.type === 'import')
       return `<div class="hint">${icon('file', 14)} ${esc(f.file)}</div><label class="pe-field"><span>Operação</span>${this.opSelect(f.op)}</label>`;
+    if (f.type === 'sheet')
+      return `
+        <label class="pe-field"><span>Esboço (contorno fechado)</span>${sketchOpts('sketch', f.sketch)}</label>
+        <div class="pe-row">${this.numField('Espessura', 'thickness', f.thickness)}${this.numField('Raio de dobra', 'radius', f.radius)}</div>
+        ${this.numField('Fator K', 'kfactor', f.kfactor, '')}
+        <div class="hint">O fator K (0 a 1) diz onde fica a linha que não estica na dobra; ele acerta o tamanho da chapa planificada. 0,44 serve para a maioria.</div>
+        <label class="pe-check"><input type="checkbox" data-k="reverse" ${f.reverse ? 'checked' : ''}/> Inverter direção</label>
+        <label class="pe-field"><span>Operação</span>${this.opSelect(f.op)}</label>`;
+    if (f.type === 'flange')
+      return `
+        <div class="hint">${f.edge ? 'Clique noutra aresta para mudar.' : 'Clique na aresta da borda da chapa.'}</div>
+        <div class="pe-row">${this.numField('Comprimento', 'length', f.length)}${this.numField('Ângulo', 'angle', f.angle, '°')}</div>
+        ${this.numField('Raio de dobra', 'radius', f.radius)}
+        <label class="pe-check"><input type="checkbox" data-k="flip" ${f.flip ? 'checked' : ''}/> Dobrar para o outro lado</label>`;
+    if (f.type === 'bend')
+      return `
+        <label class="pe-field"><span>Esboço com a linha de dobra</span>${sketchOpts('sketch', f.sketch)}</label>
+        <div class="hint">Desenhe uma linha só, sobre uma face da chapa (use “Numa face da peça” no esboço).</div>
+        <div class="pe-row">${this.numField('Ângulo', 'angle', f.angle, '°')}${this.numField('Raio de dobra', 'radius', f.radius)}</div>
+        <label class="pe-check"><input type="checkbox" data-k="flip" ${f.flip ? 'checked' : ''}/> Dobrar para o outro lado</label>
+        <label class="pe-check"><input type="checkbox" data-k="side" ${f.side ? 'checked' : ''}/> Mover o outro lado da linha</label>`;
+    if (f.type === 'flatten')
+      return `
+        <label class="pe-check"><input type="checkbox" data-k="on" ${f.on ? 'checked' : ''}/> Mostrar a chapa planificada</label>
+        <div class="hint">Abas e dobras antes daqui ficam esticadas (com o comprimento da dobra pelo fator K). A peça concluída sai como estiver: planificada ou dobrada.</div>`;
     const surfForm = this.surfaceForm(f, idx, sel, sketchOpts);
     if (surfForm !== null) return surfForm;
     const solidForm = this.solidModForm(f, idx, sel, sketchOpts, axes);
@@ -1499,6 +1532,29 @@ class PartEditor {
             ],
             act,
           );
+        case 'sheetmetal': {
+          const hasSketch = this.sketches().length > 0;
+          const hasSheet = this.part.features.some((f) => f.type === 'sheet');
+          const sheet = [...this.part.features].reverse().find((f): f is SheetFeature => f.type === 'sheet');
+          const r = sheet?.radius ?? 1;
+          const sk = this.sketches().at(-1)?.id ?? '';
+          const push = (f: NewFeature<SheetMetalFeature>) => {
+            const g = { id: fid(), name: nextName(this.part, f.type), ...f } as SheetMetalFeature;
+            this.part.features.push(g);
+            this.select(g.id);
+            this.changed();
+          };
+          return showMenu(
+            [
+              { heading: 'Chapa metálica' },
+              { label: 'Chapa (do contorno do esboço)', icon: 'sheet', disabled: !hasSketch, action: () => push({ type: 'sheet', sketch: sk, thickness: 2, radius: 1, kfactor: 0.44, reverse: false, op: 'join' }) },
+              { label: 'Aba numa aresta', icon: 'flange', disabled: !hasSheet, action: () => push({ type: 'flange', edge: null, length: 10, angle: 90, radius: r, flip: false }) },
+              { label: 'Dobra numa linha do esboço', icon: 'bend', disabled: !hasSheet || !hasSketch, action: () => push({ type: 'bend', sketch: sk, angle: 90, radius: r, flip: false, side: false }) },
+              { label: 'Planificar', icon: 'flatten', disabled: !hasSheet || this.part.features.some((f) => f.type === 'flatten'), action: () => push({ type: 'flatten', on: true }) },
+            ],
+            act,
+          );
+        }
         case 'surfaces': {
           const hasSketch = this.sketches().length > 0;
           const hasBody = this.bodyOpts(this.part.features.length).length > 0;
@@ -1602,12 +1658,12 @@ class PartEditor {
   /** The selected feature, when it is one that is set up by clicking the part. */
   private get pickFeature():
     | EdgeFeature | ShellFeature | HoleFeature | ThreadFeature | PlaneFeature | AxisFeature | PointFeature | DraftFeature | EmbossFeature | PushPullFeature
-    | FillFeature
+    | FillFeature | FlangeFeature
     | null {
     const f = this.sketchId ? null : this.feature(this.selected);
     if (!f) return null;
     if (f.type === 'fillet' || f.type === 'chamfer' || f.type === 'shell' || f.type === 'hole' || f.type === 'thread' || f.type === 'point') return f;
-    if (f.type === 'draft' || f.type === 'emboss' || f.type === 'pushpull' || f.type === 'fill') return f;
+    if (f.type === 'draft' || f.type === 'emboss' || f.type === 'pushpull' || f.type === 'fill' || f.type === 'flange') return f;
     if (f.type === 'plane' && f.kind === 'face') return f;
     if (f.type === 'axis' && (f.kind === 'edge' || f.kind === 'cylinder')) return f;
     return null;
@@ -1616,7 +1672,7 @@ class PartEditor {
   /** Whether the selected feature is picked on an edge (not a face). */
   private get picksEdges() {
     const pf = this.pickFeature;
-    return !!pf && (pf.type === 'fillet' || pf.type === 'chamfer' || pf.type === 'fill' || (pf.type === 'axis' && pf.kind === 'edge'));
+    return !!pf && (pf.type === 'fillet' || pf.type === 'chamfer' || pf.type === 'fill' || pf.type === 'flange' || (pf.type === 'axis' && pf.kind === 'edge'));
   }
 
   private fieldChange(e: Event) {

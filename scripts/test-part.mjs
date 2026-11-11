@@ -39,6 +39,13 @@ const nutBlock = () => [
   { id: 'en', type: 'extrude', name: 'en', sketch: 'n', distance: 10, symmetric: false, reverse: false, op: 'join' },
 ];
 const surf = (id, sketch, extra = {}) => ({ id, type: 'surface', name: id, kind: 'extrude', sketch, distance: 10, symmetric: false, reverse: false, axis: 'y', angle: 360, ...extra });
+const plate = () => [
+  sk('pl', 'XY', [{ id: 'r', t: 'rect', c: [0, 0], w: 40, h: 20 }]),
+  { id: 'sh', type: 'sheet', name: 'sh', sketch: 'pl', thickness: 2, radius: 1, kfactor: 0.5, reverse: false, op: 'join' },
+];
+const flange = (id, edge, extra = {}) => ({ id, type: 'flange', name: id, edge, length: 10, angle: 90, radius: 1, flip: false, ...extra });
+const bend = (id, extra = {}) => ({ id, type: 'bend', name: id, sketch: 'bl', angle: 90, radius: 1, flip: false, side: false, ...extra });
+const flatten = () => ({ id: 'flat', type: 'flatten', name: 'flat', on: true });
 const cases = {
   'varredura: círculo ao longo de L': [
     sk('path', 'XZ', [{ id: 'l1', t: 'line', a: [0, 0], b: [0, 30] }, { id: 'l2', t: 'line', a: [0, 30], b: [20, 30] }]),
@@ -238,6 +245,14 @@ const cases = {
     { id: 'fl', type: 'fillet', name: 'fl', edges: [[20, 0, 5]], all: false, size: 4 },
     { id: 't', type: 'thicken', name: 't', target: 's', thickness: 1 },
   ],
+  'chapa 2 mm + aba 90° de 10 (x até 23, z até 13, vol 2126)': [...plate(), flange('fl', [20, 0, 2])],
+  'aba planificada (x até 33,1, vol 2126)': [...plate(), flange('fl', [20, 0, 2]), flatten()],
+  'aba virada para baixo (z de -11 a 2)': [...plate(), flange('fl', [20, 0, 2], { flip: true })],
+  'furo na aba, planificado (vol 2101)': [...plate(), flange('fl', [20, 0, 2]), hole('h', [23, 0, 8], { n: [1, 0, 0], through: true }), flatten()],
+  'aba sobre aba (caixa em U) planificada': [...plate(), flange('f1', [20, 0, 2]), flange('f2', [23, 0, 13], { length: 5 }), flatten()],
+  'dobra no meio (vol 1600, z até 19,9)': [...plate(), sk('bl', 'XY', [{ id: 'l', t: 'line', a: [0, -15], b: [0, 15] }], 2), bend('b')],
+  'dobra planificada = chapa reta (x -20..20)': [...plate(), sk('bl', 'XY', [{ id: 'l', t: 'line', a: [0, -15], b: [0, 15] }], 2), bend('b'), flatten()],
+  'erro esperado: dobra sem chapa': [...box(), sk('bl', 'XY', [{ id: 'l', t: 'line', a: [0, -15], b: [0, 15] }], 10), bend('b')],
   'erro esperado: mola com voltas encostando': [{ id: 'c', type: 'coil', name: 'c', axis: 'z', diameter: 20, pitch: 2, turns: 5, wire: 3, op: 'join' }],
   'erro esperado: esboço aberto': [
     sk('s1', 'XY', [{ id: 'l1', t: 'line', a: [0, 0], b: [10, 0] }]),

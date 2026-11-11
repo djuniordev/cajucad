@@ -96,6 +96,10 @@ const P: Record<string, string> = {
   fill: '<path d="M4 9c3-4 13-4 16 0v8c-3 4-13 4-16 0z" stroke-dasharray="3 2"/><path d="M4 13c3 3 13 3 16 0" fill="currentColor" fill-opacity=".2"/>',
   stitch: '<path d="M3 12h18"/><path d="M6 8l2 8M11 8l2 8M16 8l2 8"/>',
   thicken: '<path d="M3 10c3-4 6-4 9-1s6 3 9-1"/><path d="M3 16c3-4 6-4 9-1s6 3 9-1"/><path d="M12 9v6" opacity=".6"/>',
+  sheet: '<path d="M3 15l9-4 9 4-9 4z"/><path d="M3 15v2l9 4 9-4v-2" opacity=".6"/>',
+  flange: '<path d="M3 17h12a3 3 0 003-3V4"/><path d="M3 20h12a6 6 0 006-6V4" opacity=".6"/>',
+  bend: '<path d="M3 20h8a6 6 0 006-6V8l4-4"/><path d="M11 14h4" stroke-dasharray="2 2"/>',
+  flatten: '<path d="M3 12h18"/><path d="M3 16h18" opacity=".6"/><path d="M8 8l4-4 4 4M12 4v6" opacity=".7"/>',
   fx: '<path d="M10 4H8a2 2 0 00-2 2v12a2 2 0 01-2 2"/><path d="M4 10h7"/><path d="M14 10l6 8M20 10l-6 8"/>',
   combine: '<circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/>',
 };
