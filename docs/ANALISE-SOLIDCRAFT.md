@@ -76,3 +76,17 @@ grupos, furos, exportação e impressão Bambu continuam iguais.
    Manifold, porque o booleano do OpenCascade falha com hélices longas.)
 4. Montagem simples: encaixar uma face na outra, juntas rígida, giratória e deslizante, e
    verificação de colisão, tudo na cena principal. **Feito.**
+5. Esboço avançado: spline, elipse, ranhura, texto, aparar, estender, deslocar, projetar. **Feito.**
+6. Planos, eixos e pontos de referência. **Feito.**
+7. Sólido avançado e vários corpos: inclinação, nervura, tubo, mola, relevo, dividir, empurrar e
+   puxar, escalar, mover e combinar. **Feito.**
+8. Parâmetros, fórmulas, configurações e reordenar o histórico. **Feito.**
+9. Superfícies: extrudar, revolver, remendo, preencher, costurar, aparar e engrossar. **Feito.**
+10. Chapa metálica: chapa, aba, dobra e planificar. **Feito.** (No modo planificado, esboços feitos
+    sobre faces dobradas não são remapeados.)
+11. Montagem avançada: juntas cilíndrica, esférica e plana, contato, estudo de movimento (só
+    visual), vista explodida, lista de peças com massa, centro de massa e cópias ligadas
+    (componentes). **Feito.**
+
+Fora do plano, por escolha: simulação, CAM, nuvem, renderização realista e perfis de solda e de
+plástico. Também não há "dividir face".
