@@ -38,6 +38,7 @@ const nutBlock = () => [
   sk('n', 'XY', [{ id: 'r', t: 'rect', c: [0, 0], w: 20, h: 20 }, { id: 'c', t: 'circle', c: [0, 0], r: 4 }]),
   { id: 'en', type: 'extrude', name: 'en', sketch: 'n', distance: 10, symmetric: false, reverse: false, op: 'join' },
 ];
+const surf = (id, sketch, extra = {}) => ({ id, type: 'surface', name: id, kind: 'extrude', sketch, distance: 10, symmetric: false, reverse: false, axis: 'y', angle: 360, ...extra });
 const cases = {
   'varredura: círculo ao longo de L': [
     sk('path', 'XZ', [{ id: 'l1', t: 'line', a: [0, 0], b: [0, 30] }, { id: 'l2', t: 'line', a: [0, 30], b: [20, 30] }]),
@@ -200,6 +201,43 @@ const cases = {
     { id: 'e2', type: 'extrude', name: 'e2', sketch: 'c2', distance: 10, symmetric: false, reverse: false, op: 'new' },
     hole('h', [0, 0, 10], { through: true }),
   ],
+  'superfície extrudada de um arco + espessar 2': [
+    sk('a', 'XY', [{ id: 'a1', t: 'arc', a: [-10, 0], m: [0, 10], b: [10, 0] }]),
+    surf('s', 'a', { distance: 20 }),
+    { id: 't', type: 'thicken', name: 't', target: 's', thickness: 2 },
+  ],
+  'erro esperado: concluir com superfície aberta': [sk('a', 'XY', [{ id: 'l', t: 'line', a: [0, 0], b: [10, 0] }]), surf('s', 'a', { distance: 5 })],
+  'superfície de revolução (taça) + remendo no fundo + costurar em sólido': [
+    sk('p', 'XZ', [{ id: 'l1', t: 'line', a: [10, 0], b: [15, 20] }]),
+    surf('r', 'p', { kind: 'revolve', axis: 'y', angle: 360 }),
+    sk('b', 'XY', [{ id: 'c', t: 'circle', c: [0, 0], r: 10 }]),
+    surf('f1', 'b', { kind: 'patch' }),
+    sk('t', 'XY', [{ id: 'c', t: 'circle', c: [0, 0], r: 15 }], 20),
+    surf('f2', 't', { kind: 'patch' }),
+    { id: 'st', type: 'stitch', name: 'st', bodies: ['r', 'f1', 'f2'], solid: true },
+  ],
+  'remendos nas bordas de cima e de baixo + costurar (meio cilindro)': [
+    sk('a', 'XY', [{ id: 'a1', t: 'arc', a: [-10, 0], m: [0, 10], b: [10, 0] }, { id: 'l', t: 'line', a: [10, 0], b: [-10, 0] }]),
+    surf('s', 'a', { distance: 20 }),
+    { id: 'f', type: 'fill', name: 'f', edges: [[0, 10, 20], [0, 0, 20]] },
+    { id: 'g', type: 'fill', name: 'g', edges: [[0, 10, 0], [0, 0, 0]] },
+    { id: 'st', type: 'stitch', name: 'st', bodies: ['s', 'f', 'g'], solid: true },
+  ],
+  'aparar superfície com plano e com corpo': [
+    sk('a', 'XZ', [{ id: 'l', t: 'line', a: [-20, 0], b: [20, 0] }]),
+    surf('s', 'a', { distance: 30, symmetric: true }),
+    { id: 'tp', type: 'trim', name: 'tp', target: 's', by: 'plane', plane: 'YZ', tool: '', flip: false, keepTool: false },
+    sk('c', 'XY', [{ id: 'c', t: 'circle', c: [10, 0], r: 4 }], -5),
+    { id: 'cy', type: 'extrude', name: 'cy', sketch: 'c', distance: 10, symmetric: false, reverse: false, op: 'new' },
+    { id: 'tb', type: 'trim', name: 'tb', target: 's', by: 'body', plane: '', tool: 'cy', flip: false, keepTool: false },
+    { id: 't', type: 'thicken', name: 't', target: 's', thickness: 1 },
+  ],
+  'filete na aresta entre superfícies costuradas': [
+    sk('a', 'XY', [{ id: 'l1', t: 'line', a: [0, 0], b: [20, 0] }, { id: 'l2', t: 'line', a: [20, 0], b: [20, 20] }]),
+    surf('s', 'a', { distance: 10 }),
+    { id: 'fl', type: 'fillet', name: 'fl', edges: [[20, 0, 5]], all: false, size: 4 },
+    { id: 't', type: 'thicken', name: 't', target: 's', thickness: 1 },
+  ],
   'erro esperado: mola com voltas encostando': [{ id: 'c', type: 'coil', name: 'c', axis: 'z', diameter: 20, pitch: 2, turns: 5, wire: 3, op: 'join' }],
   'erro esperado: esboço aberto': [
     sk('s1', 'XY', [{ id: 'l1', t: 'line', a: [0, 0], b: [10, 0] }]),
@@ -209,6 +247,8 @@ const cases = {
 let failed = 0;
 for (const [name, features] of Object.entries(cases)) {
   const r = await buildPart({ version: 1, features });
+  // Like "Concluir peça": surfaces without thickness cannot be printed.
+  if (!r.error && r.surfaces.length && name.startsWith('erro')) r.error = { message: `${r.surfaces.length} superfície(s) sem espessura` };
   const p = r.mesh?.positions ?? [];
   const bb = [0, 1, 2].map((a) => {
     const v = p.filter((_, i) => i % 3 === a);
@@ -224,7 +264,7 @@ for (const [name, features] of Object.entries(cases)) {
     }
     vol = Math.round(v / 6);
   }
-  console.log(`${r.error && !name.startsWith('erro') ? 'FALHOU' : 'ok    '} ${name}: tris ${(r.mesh?.indices.length ?? 0) / 3}, x ${bb[0]} y ${bb[1]} z ${bb[2]} vol ${vol}${r.bodies.length > 1 ? ` corpos ${r.bodies.length}` : ''}${r.error ? ` | erro: ${r.error.message}` : ''}`);
-  if (name.startsWith('erro') ? !r.error : r.error || !r.mesh) failed++;
+  console.log(`${r.error && !name.startsWith('erro') ? 'FALHOU' : 'ok    '} ${name}: tris ${(r.mesh?.indices.length ?? 0) / 3}, x ${bb[0]} y ${bb[1]} z ${bb[2]} vol ${vol}${r.surfaces.length ? ` superfícies ${r.surfaces.length}` : ''}${r.bodies.length > 1 ? ` corpos ${r.bodies.length}` : ''}${r.error ? ` | erro: ${r.error.message}` : ''}`);
+  if (name.startsWith('erro') ? !r.error : r.error || !r.mesh || r.surfaces.length) failed++;
 }
 process.exit(failed ? 1 : 0);

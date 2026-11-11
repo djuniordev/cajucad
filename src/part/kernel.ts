@@ -2,7 +2,7 @@
  * OpenCascade kernel (via replicad): turns a PartDef into an exact solid and its mesh.
  * The WASM module is large (~22 MB), so it loads only when a part is first edited.
  */
-import type { Drawing, Edge, Face, Shape3D, Sketch, Wire } from 'replicad';
+import type { Drawing, Edge, Face, Shape3D, Shell, Sketch, Wire } from 'replicad';
 import { cutThreads, type ThreadCut } from './threads';
 import {
   pointInPolygon,
@@ -38,6 +38,7 @@ import {
   type PipeFeature,
   type CoilFeature,
   type EmbossFeature,
+  type SurfaceFeature,
   type ThreadFeature,
   type PartDef,
   type PatternFeature,
@@ -425,7 +426,7 @@ export interface Body {
 export async function buildPart(
   part: PartDef,
   opts: BuildOptions = {},
-): Promise<BuildResult & { shape: Shape3D | null; edges?: number[][]; refs: Refs; bodies: string[] }> {
+): Promise<BuildResult & { shape: Shape3D | null; edges?: number[][]; refs: Refs; bodies: string[]; surfaces: string[] }> {
   const rc = await loadKernel();
   refs = emptyRefs();
   const sketches = new Map<string, SketchFeature>();
@@ -602,6 +603,65 @@ export async function buildPart(
           } else set(out);
           break;
         }
+        case 'surface': {
+          const sheet = surfaceOf(rc, f, sketches);
+          bodies.push({ id: f.id, shape: sheet });
+          cur = bodies.length - 1;
+          break;
+        }
+        case 'fill': {
+          const body = need('remendar', f.edges[0]);
+          if (f.edges.length < 2) throw new Error('Clique nas arestas que fecham o buraco (pelo menos duas).');
+          const edges = findNear(rc, body, body.edges, f.edges, 'arestas');
+          bodies.push({ id: f.id, shape: fillEdges(rc, edges) });
+          cur = bodies.length - 1;
+          break;
+        }
+        case 'stitch': {
+          const idx = f.bodies.map((id) => bodies.findIndex((b) => b.id === id));
+          if (idx.length < 1) throw new Error('Escolha as superfícies que vão ser costuradas.');
+          if (idx.some((i) => i < 0)) throw new Error('Uma das superfícies não existe mais (ou vem depois desta operação).');
+          const parts = idx.map((i) => bodies[i].shape) as unknown as (Face | Shell)[];
+          let out: Shape3D = rc.weldShellsAndFaces(parts) as Shape3D;
+          if (f.solid) {
+            try {
+              out = rc.makeSolid([out as Shell]);
+            } catch {
+              throw new Error('As superfícies não fecham um volume: não dá para virar sólido. Desmarque “Virar sólido” ou feche os buracos.');
+            }
+            if (!(volume(rc, out) > 0)) throw new Error('As superfícies não fecham um volume: não dá para virar sólido.');
+          }
+          const first = bodies[Math.min(...idx)];
+          first.shape = out;
+          for (const i of [...idx].sort((a, b) => b - a)) if (bodies[i] !== first) bodies.splice(i, 1);
+          cur = bodies.indexOf(first);
+          break;
+        }
+        case 'trim': {
+          const t = bodies.findIndex((b) => b.id === f.target);
+          if (t < 0) throw new Error('O corpo a aparar não existe mais (ou vem depois desta operação).');
+          const target = bodies[t];
+          if (f.by === 'plane') {
+            const fr = frameOf(f.plane, refs);
+            if (!fr) throw new Error('O plano de corte foi apagado ou vem depois desta operação.');
+            target.shape = target.shape.cut(halfSpace(rc, target.shape, fr, f.flip));
+          } else {
+            const k = bodies.findIndex((b) => b.id === f.tool);
+            if (k < 0 || k === t) throw new Error('Escolha outro corpo para cortar.');
+            target.shape = target.shape.cut(bodies[k].shape.clone());
+            if (!f.keepTool) bodies.splice(k, 1);
+          }
+          cur = bodies.indexOf(target);
+          break;
+        }
+        case 'thicken': {
+          const t = bodies.findIndex((b) => b.id === f.target);
+          if (t < 0) throw new Error('A superfície não existe mais (ou vem depois desta operação).');
+          if (!f.thickness) throw new Error('A espessura não pode ser zero.');
+          bodies[t].shape = thicken(rc, bodies[t].shape, f.thickness);
+          cur = t;
+          break;
+        }
         case 'combine': {
           const t = bodies.findIndex((b) => b.id === f.target);
           if (t < 0) throw new Error('O corpo de destino não existe mais (ou vem depois desta operação).');
@@ -622,6 +682,8 @@ export async function buildPart(
     }
     if (f.id === opts.upTo) break;
   }
+  // (makeCompound below frees the bodies' shapes.)
+  const surfaces = bodies.filter((b) => !isSolid(b.shape)).map((b) => b.id);
   const shape = !bodies.length ? null : bodies.length === 1 ? bodies[0].shape : (rc.makeCompound(bodies.map((b) => b.shape)) as Shape3D);
   const edges = shape && opts.edges ? edgeLines(shape) : undefined;
   let mesh = shape ? meshOf(shape) : null;
@@ -633,7 +695,122 @@ export async function buildPart(
       error ??= { feature: threadIds.at(-1)!, message: kernelMessage(e) };
     }
   }
-  return { shape, mesh, error, edges, refs, bodies: bodies.map((b) => b.id) };
+  return { shape, mesh, error, edges, refs, bodies: bodies.map((b) => b.id), surfaces };
+}
+
+/** Whether a body encloses volume (as opposed to a surface with no thickness). */
+const isSolid = (s: Shape3D) => {
+  try {
+    return s.solids.length > 0;
+  } catch {
+    return false;
+  }
+};
+
+/** Every curve of a sketch as wires on its plane: open chains one by one, closed outlines whole. */
+function sketchCurveWires(rc: Replicad, s: SketchFeature): Wire[] {
+  const plane = planeFor(rc, s);
+  const out: Wire[] = [];
+  for (const e of s.entities) {
+    if (e.construction || e.t === 'text') continue;
+    let d: Drawing;
+    if (e.t === 'line' || e.t === 'arc' || e.t === 'spline') {
+      const ends = curveEnds(e)!;
+      const seg: Seg = e.t === 'line' ? { t: 'line', to: e.b } : e.t === 'arc' ? { t: 'arc', m: e.m, to: e.b } : { t: 'spline', via: e.pts.slice(1, -1), to: ends[1] };
+      d = drawSegs(rc, ends[0], [seg], false);
+    } else {
+      const { profiles } = sketchProfiles([e]);
+      if (!profiles.length) continue;
+      d = profileDrawing(rc, profiles[0]);
+    }
+    out.push((d.sketchOnPlane(plane) as Sketch).wire);
+  }
+  if (!out.length) throw new Error(`“${s.name}” não tem linhas para virar superfície.`);
+  return out;
+}
+
+function surfaceOf(rc: Replicad, f: SurfaceFeature, sketches: Map<string, SketchFeature>): Shape3D {
+  const s = sketches.get(f.sketch);
+  if (!s) throw new Error('O esboço desta superfície foi apagado ou vem depois dela.');
+  const P = frameFor(s);
+  const oc = rc.getOC();
+  if (f.kind === 'patch') {
+    const ws = sketchWires(rc, s);
+    const outer = ws.filter((w) => !w.hole);
+    if (outer.length !== 1) throw new Error('O remendo precisa de um contorno fechado só (furos dentro dele podem).');
+    return rc.makeFace(outer[0].wire, ws.filter((w) => w.hole).map((w) => w.wire)) as unknown as Shape3D;
+  }
+  const wires = sketchCurveWires(rc, s);
+  const pieces: Shape3D[] = [];
+  if (f.kind === 'extrude') {
+    if (!(f.distance > 0)) throw new Error('A distância precisa ser maior que zero.');
+    const dir = f.symmetric || !f.reverse ? P.n : v3.mul(P.n, -1);
+    const shift = f.symmetric ? v3.mul(P.n, -f.distance / 2) : null;
+    for (let w of wires) {
+      if (shift) w = w.translate(shift);
+      const vec = new rc.Vector(v3.mul(dir, f.distance));
+      const mk = new oc.BRepPrimAPI_MakePrism(w.wrapped, vec.wrapped, false, true);
+      pieces.push(rc.cast(mk.Shape()) as Shape3D);
+      mk.delete();
+      vec.delete();
+    }
+  } else {
+    if (!(f.angle > 0 && f.angle <= 360)) throw new Error('O ângulo precisa estar entre 0 e 360°.');
+    const ax = f.axis === 'x' || f.axis === 'y' ? { o: P.o, d: f.axis === 'x' ? P.x : P.y } : refs.axes[f.axis];
+    if (!ax) throw new Error('O eixo desta revolução foi apagado ou vem depois dela.');
+    for (const w of wires) {
+      const a1 = rc.makeAx1(ax.o, ax.d);
+      const mk = new oc.BRepPrimAPI_MakeRevol(w.wrapped, a1, (f.angle * Math.PI) / 180, false);
+      pieces.push(rc.cast(mk.Shape()) as Shape3D);
+      mk.delete();
+      a1.delete();
+    }
+  }
+  return pieces.length === 1 ? pieces[0] : (rc.weldShellsAndFaces(pieces as unknown as (Face | Shell)[], true) as Shape3D);
+}
+
+/** A smooth face spanning a closed loop of edges. */
+function fillEdges(rc: Replicad, edges: Edge[]): Shape3D {
+  const oc = rc.getOC();
+  const mk = new oc.BRepOffsetAPI_MakeFilling(3, 15, 2, false, 1e-5, 1e-4, 1e-2, 0.1, 8, 9);
+  try {
+    for (const e of edges) mk.Add(e.wrapped, oc.GeomAbs_Shape.GeomAbs_C0, true);
+    mk.Build(new oc.Message_ProgressRange());
+    if (!mk.IsDone()) throw new Error('fill');
+    return rc.cast(mk.Shape()) as Shape3D;
+  } catch {
+    throw new Error('Não deu para remendar: as arestas escolhidas precisam fechar um contorno.');
+  } finally {
+    mk.delete();
+  }
+}
+
+/** Big block on one side of a plane (the side the normal points to when `front`). */
+function halfSpace(rc: Replicad, near: Shape3D, fr: Frame, front: boolean): Shape3D {
+  const b = near.boundingBox;
+  const L = 4 * Math.max(1, Math.hypot(b.width, b.height, b.depth)) + v3.len(v3.sub([b.center[0], b.center[1], b.center[2]], fr.o));
+  const dir = front ? fr.n : v3.mul(fr.n, -1);
+  return rc.drawRectangle(2 * L, 2 * L).sketchOnPlane(new rc.Plane(fr.o, fr.x, fr.n)).extrude(L, { extrusionDirection: dir }) as Shape3D;
+}
+
+/** Solid wall grown from a surface. */
+function thicken(rc: Replicad, s: Shape3D, t: number): Shape3D {
+  if (isSolid(s)) throw new Error('Este corpo já é sólido: espessar é para superfícies.');
+  const oc = rc.getOC();
+  const mk = new oc.BRepOffsetAPI_MakeThickSolid();
+  try {
+    mk.MakeThickSolidBySimple(s.wrapped, t);
+    mk.Build(new oc.Message_ProgressRange());
+    let out = rc.cast(mk.Shape()) as Shape3D;
+    if (!isSolid(out)) throw new Error('thick');
+    // Thickening to the back of the surface leaves the solid inside out.
+    if (volume(rc, out) < 0) out = rc.cast(out.wrapped.Reversed()) as Shape3D;
+    return out;
+  } catch {
+    throw new Error('O motor não conseguiu espessar esta superfície (tente uma espessura menor).');
+  } finally {
+    mk.delete();
+  }
 }
 
 const volume = (rc: Replicad, s: Shape3D) => rc.measureShapeVolumeProperties(s).volume;

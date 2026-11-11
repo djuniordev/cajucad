@@ -55,6 +55,9 @@ import {
   type EmbossFeature,
   type PushPullFeature,
   type SolidModFeature,
+  type FillFeature,
+  type SurfaceFeature,
+  type SurfaceOpFeature,
   type PartDef,
   type PlaneName,
   type PointRef,
@@ -134,6 +137,9 @@ const OPS: [BodyOp, string][] = [
   ['new', 'Corpo novo'],
 ];
 
+/** A feature still without its id and name (keeps the union apart). */
+type NewFeature<T> = T extends unknown ? Omit<T, 'id' | 'name'> : never;
+
 /** Feature number fields (they also take formulas). */
 const NUM_KEYS = ['offset', 'distance', 'angle', 'size', 'thickness', 'diameter', 'depth', 'headDiameter', 'headDepth', 'count', 'spacing', 'count2', 'spacing2', 'pitch', 'length', 'factor', 'turns', 'wire', 'wall', 'rot'];
 
@@ -173,6 +179,8 @@ class PartEditor {
   private selected: string | null = null;
   /** The parameters table is open in the side panel. */
   private showParams = false;
+  /** Bodies of the last full build that are surfaces (no thickness). */
+  private lastSurfaces: string[] = [];
   private errors = new Map<string, string>();
 
   // inspect
@@ -384,7 +392,7 @@ class PartEditor {
       try {
         return await buildPart(part, o);
       } catch (e) {
-        return { mesh: null, shape: null, edges: undefined, refs: emptyRefs(), error: { feature: '', message: (e as Error).message } };
+        return { mesh: null, shape: null, edges: undefined, refs: emptyRefs(), bodies: [], surfaces: [], error: { feature: '', message: (e as Error).message } };
       }
     };
     const r = await safe();
@@ -394,6 +402,7 @@ class PartEditor {
     this.errors.clear();
     if (r.error) this.errors.set(r.error.feature, r.error.message);
     this.refs = r.refs;
+    this.lastSurfaces = r.surfaces ?? [];
     this.drawConstruction();
     this.showSolid(view.mesh);
     this.pickEdges = view.edges ?? null;
@@ -415,7 +424,9 @@ class PartEditor {
                     ? 'Clique na peça para pôr o ponto ali, ou digite as coordenadas.'
                     : pf.type === 'draft'
                       ? 'Clique nas faces que vão inclinar. Esc mostra o resultado.'
-                      : pf.type === 'emboss' || pf.type === 'pushpull'
+                      : pf.type === 'fill'
+                        ? 'Clique nas arestas que contornam o buraco. Esc mostra o resultado.'
+                        : pf.type === 'emboss' || pf.type === 'pushpull'
                         ? 'Clique numa face plana da peça. Esc mostra o resultado.'
                         : 'Clique nas arestas para pôr ou tirar. Esc mostra o resultado.';
       this.status.textContent = r.error ? `⚠ ${this.feature(r.error.feature)?.name ?? 'Erro'}: ${r.error.message}` : hint || (r.mesh ? 'Peça atualizada.' : 'Crie um esboço e depois extrude ou revolva.');
@@ -520,7 +531,7 @@ class PartEditor {
     const pf = this.pickFeature!;
     const hit = this.pickAt(e);
     if (!hit) return;
-    if ((pf.type === 'fillet' || pf.type === 'chamfer') && hit.edge != null) {
+    if ((pf.type === 'fillet' || pf.type === 'chamfer' || pf.type === 'fill') && hit.edge != null) {
       const at = pf.edges.findIndex((p) => this.edgeNear(p) === hit.edge);
       if (at >= 0) pf.edges.splice(at, 1);
       else pf.edges.push(this.edgeMid(hit.edge));
@@ -594,8 +605,8 @@ class PartEditor {
       this.picksGroup.add(m);
     };
     const hov = this.hoverPick;
-    if (pf.type === 'fillet' || pf.type === 'chamfer') {
-      if (pf.all || !this.pickEdges) return;
+    if (pf.type === 'fillet' || pf.type === 'chamfer' || pf.type === 'fill') {
+      if ((pf.type !== 'fill' && pf.all) || !this.pickEdges) return;
       const chosen = new Set(pf.edges.map((p) => this.edgeNear(p)));
       for (const i of chosen) if (i >= 0) thick(this.pickEdges[i], accent, 4);
       if (hov?.edge != null && !chosen.has(hov.edge)) thick(this.pickEdges[hov.edge], accent, 3, 0.55);
@@ -852,7 +863,7 @@ class PartEditor {
       })
       .join('');
     const hasSketch = this.sketches().length > 0;
-    const hasSolid = fs.some((f) => MAKES_SOLID.includes(f.type));
+    const hasSolid = this.bodyOpts(fs.length).length > 0;
     const twoSketches = this.sketches().length > 1;
     const btn = (act: string, ic: string, label: string, on: boolean) => `<button class="btn soft" data-act="${act}" ${on ? '' : 'disabled'}>${icon(ic, 16)}<span>${label}</span></button>`;
     return `
@@ -873,6 +884,7 @@ class PartEditor {
         ${btn('import-step', 'import', 'STEP', true)}
         ${btn('construct', 'plane', 'Referência', true)}
         ${btn('more-solid', 'combine', 'Mais', true)}
+        ${btn('surfaces', 'surface', 'Superfície', true)}
         <button class="btn soft ${this.showParams ? 'active' : ''}" data-act="params">${icon('fx', 16)}<span>Parâmetros</span></button>
       </div>
       ${this.showParams ? this.paramsPanel() : sel ? `<div class="pe-params"><div class="panel-title pe-ftitle"><span>${esc(sel.name)}</span>
@@ -1115,6 +1127,58 @@ class PartEditor {
       <button class="btn soft wide" data-act="sketch-on" data-id="${f.id}">${icon('sketch', 15)} Novo esboço neste plano</button>`;
   }
 
+  private surfaceForm(f: Feature, idx: number, sel: (k: string, cur: string, opts: [string, string][]) => string, sketchOpts: (k: string, cur: string) => string): string | null {
+    const bodies = this.bodyOpts(idx);
+    const surfaces = new Set(this.lastSurfaces);
+    const pick = (k: string, cur: string, label: string) => `<label class="pe-field"><span>${label}</span>${sel(k, cur, [['', '—'], ...bodies])}</label>`;
+    switch (f.type) {
+      case 'surface': {
+        const kinds = sel('kind', f.kind, [['extrude', 'Extrudada'], ['revolve', 'De revolução'], ['patch', 'Remendo plano']]);
+        let body = `<label class="pe-field"><span>Tipo</span>${kinds}</label><label class="pe-field"><span>Esboço</span>${sketchOpts('sketch', f.sketch)}</label>`;
+        if (f.kind === 'extrude')
+          body += `${this.numField('Distância', 'distance', f.distance)}
+            <label class="pe-check"><input type="checkbox" data-k="symmetric" ${f.symmetric ? 'checked' : ''}/> Para os dois lados</label>
+            <label class="pe-check"><input type="checkbox" data-k="reverse" ${f.reverse ? 'checked' : ''} ${f.symmetric ? 'disabled' : ''}/> Inverter direção</label>`;
+        if (f.kind === 'revolve')
+          body += `<label class="pe-field"><span>Eixo</span>${sel('axis', f.axis, this.axisOpts(idx, [['y', 'Vertical do esboço (Y)'], ['x', 'Horizontal do esboço (X)']]))}</label>${this.numField('Ângulo', 'angle', f.angle, '°')}`;
+        if (f.kind === 'patch') body += `<div class="hint">Preenche o contorno fechado do esboço com uma face plana.</div>`;
+        return body + `<div class="hint">Superfícies não têm espessura: espesse ou costure até fechar um sólido antes de concluir.</div>`;
+      }
+      case 'fill': {
+        const n = f.edges.length;
+        return `<div class="hint">${n ? `${n} ${n === 1 ? 'aresta escolhida' : 'arestas escolhidas'}.` : 'Nenhuma aresta ainda.'} Clique nas arestas que contornam o buraco.</div>
+          ${n ? `<button class="btn soft wide" data-act="clear-picks">Limpar escolha</button>` : ''}`;
+      }
+      case 'stitch':
+        return `<div class="pe-field"><span>Superfícies a costurar</span>
+          ${bodies.map(([id, l]) => `<label class="pe-check"><input type="checkbox" data-k="body:${id}" ${f.bodies.includes(id) ? 'checked' : ''}/> ${esc(l)}${surfaces.has(id) ? '' : ' <span class="hint">(sólido)</span>'}</label>`).join('')}</div>
+          <label class="pe-check"><input type="checkbox" data-k="solid" ${f.solid ? 'checked' : ''}/> Virar sólido (quando fecham um volume)</label>`;
+      case 'trim':
+        return `${pick('target', f.target, 'Corpo a aparar')}
+          <label class="pe-field"><span>Cortar com</span>${sel('by', f.by, [['plane', 'Um plano'], ['body', 'Outro corpo']])}</label>
+          ${f.by === 'plane'
+            ? `<label class="pe-field"><span>Plano</span>${sel('plane', f.plane, this.planeOpts(idx))}</label>
+               <label class="pe-check"><input type="checkbox" data-k="flip" ${f.flip ? 'checked' : ''}/> Ficar com o lado de trás do plano</label>`
+            : `${pick('tool', f.tool, 'Corpo que corta')}<label class="pe-check"><input type="checkbox" data-k="keepTool" ${f.keepTool ? 'checked' : ''}/> Manter o corpo que corta</label>`}`;
+      case 'thicken':
+        return `${pick('target', f.target, 'Superfície')}${this.numField('Espessura', 'thickness', f.thickness)}<div class="hint">Negativo cresce para o outro lado.</div>`;
+    }
+    return null;
+  }
+
+  private addSurfaceOp(p: NewFeature<SurfaceOpFeature>) {
+    const bodies = this.bodyOpts(this.part.features.length);
+    const surfaces = bodies.filter(([id]) => this.lastSurfaces.includes(id));
+    const f = { id: fid(), name: nextName(this.part, p.type), ...p } as SurfaceOpFeature;
+    // Start with the most likely choice: the last surface.
+    if (f.type === 'trim' || f.type === 'thicken') f.target = (surfaces.at(-1) ?? bodies.at(-1))?.[0] ?? '';
+    if (f.type === 'stitch') f.bodies = surfaces.map(([id]) => id);
+    if (f.type === 'surface') f.name = nextName(this.part, 'surface');
+    this.part.features.push(f);
+    this.select(f.id);
+    this.changed();
+  }
+
   /** Bodies that exist just before position `idx` of the history, named by the feature that made them. */
   private bodyOpts(idx: number): [string, string][] {
     const out: [string, string][] = [];
@@ -1122,6 +1186,15 @@ class PartEditor {
       const op = (f as { op?: BodyOp }).op;
       if ((MAKES_SOLID.includes(f.type) && (!out.length || op === 'new')) || (f.type === 'split' && f.keep === 'both') || (f.type === 'move' && f.copy))
         out.push([f.id, `Corpo ${out.length + 1} (${f.name})`]);
+      if (f.type === 'surface' || f.type === 'fill') out.push([f.id, `Superfície ${out.length + 1} (${f.name})`]);
+      const drop = (ids: string[]) => {
+        for (const t of ids) {
+          const i = out.findIndex(([id]) => id === t);
+          if (i >= 0) out.splice(i, 1);
+        }
+      };
+      if (f.type === 'stitch') drop(f.bodies.filter((id) => id !== out.find(([b]) => f.bodies.includes(b))?.[0]));
+      if (f.type === 'trim' && f.by === 'body' && !f.keepTool) drop([f.tool]);
       if (f.type === 'combine' && !f.keepTools)
         for (const t of f.tools) {
           const i = out.findIndex(([id]) => id === t && t !== f.target);
@@ -1287,6 +1360,8 @@ class PartEditor {
     }
     if (f.type === 'import')
       return `<div class="hint">${icon('file', 14)} ${esc(f.file)}</div><label class="pe-field"><span>Operação</span>${this.opSelect(f.op)}</label>`;
+    const surfForm = this.surfaceForm(f, idx, sel, sketchOpts);
+    if (surfForm !== null) return surfForm;
     const solidForm = this.solidModForm(f, idx, sel, sketchOpts, axes);
     if (solidForm !== null) return solidForm;
     if (f.type !== 'pattern') return '';
@@ -1424,8 +1499,29 @@ class PartEditor {
             ],
             act,
           );
+        case 'surfaces': {
+          const hasSketch = this.sketches().length > 0;
+          const hasBody = this.bodyOpts(this.part.features.length).length > 0;
+          const add = (f: Omit<SurfaceFeature, 'id' | 'name' | 'type'>) => () => this.addSurfaceOp({ type: 'surface', ...f });
+          const sk = this.sketches().at(-1)?.id ?? '';
+          const base = { sketch: sk, distance: 10, symmetric: false, reverse: false, axis: 'y', angle: 360 };
+          return showMenu(
+            [
+              { heading: 'Criar superfície' },
+              { label: 'Extrudada (das linhas do esboço)', icon: 'extrude', disabled: !hasSketch, action: add({ ...base, kind: 'extrude' }) },
+              { label: 'De revolução', icon: 'revolve', disabled: !hasSketch, action: add({ ...base, kind: 'revolve' }) },
+              { label: 'Remendo plano (contorno do esboço)', icon: 'surface', disabled: !hasSketch, action: add({ ...base, kind: 'patch' }) },
+              { label: 'Remendo nas arestas', icon: 'surface', disabled: !hasBody, action: () => this.addSurfaceOp({ type: 'fill', edges: [] }) },
+              { heading: 'Mudar' },
+              { label: 'Costurar', icon: 'combine', disabled: !hasBody, action: () => this.addSurfaceOp({ type: 'stitch', bodies: [], solid: false }) },
+              { label: 'Aparar', icon: 'trim', disabled: !hasBody, action: () => this.addSurfaceOp({ type: 'trim', target: '', by: 'plane', plane: 'XY', tool: '', flip: false, keepTool: false }) },
+              { label: 'Espessar', icon: 'shell', disabled: !hasBody, action: () => this.addSurfaceOp({ type: 'thicken', target: '', thickness: 2 }) },
+            ],
+            act,
+          );
+        }
         case 'more-solid': {
-          const hasSolid = this.part.features.some((f) => MAKES_SOLID.includes(f.type));
+          const hasSolid = this.bodyOpts(this.part.features.length).length > 0;
           const hasSketch = this.sketches().length > 0;
           const item = (type: SolidModFeature['type'], label: string, on: boolean) => ({ label, icon: type, disabled: !on, action: () => this.addSolidMod(type) });
           return showMenu(
@@ -1464,6 +1560,7 @@ class PartEditor {
           const f = this.feature(this.selected);
           if (f?.type === 'fillet' || f?.type === 'chamfer') f.edges = [];
           if (f?.type === 'shell' || f?.type === 'draft') f.faces = [];
+          if (f?.type === 'fill') f.edges = [];
           return this.changed();
         }
         case 'edit-sketch':
@@ -1505,11 +1602,12 @@ class PartEditor {
   /** The selected feature, when it is one that is set up by clicking the part. */
   private get pickFeature():
     | EdgeFeature | ShellFeature | HoleFeature | ThreadFeature | PlaneFeature | AxisFeature | PointFeature | DraftFeature | EmbossFeature | PushPullFeature
+    | FillFeature
     | null {
     const f = this.sketchId ? null : this.feature(this.selected);
     if (!f) return null;
     if (f.type === 'fillet' || f.type === 'chamfer' || f.type === 'shell' || f.type === 'hole' || f.type === 'thread' || f.type === 'point') return f;
-    if (f.type === 'draft' || f.type === 'emboss' || f.type === 'pushpull') return f;
+    if (f.type === 'draft' || f.type === 'emboss' || f.type === 'pushpull' || f.type === 'fill') return f;
     if (f.type === 'plane' && f.kind === 'face') return f;
     if (f.type === 'axis' && (f.kind === 'edge' || f.kind === 'cylinder')) return f;
     return null;
@@ -1518,7 +1616,7 @@ class PartEditor {
   /** Whether the selected feature is picked on an edge (not a face). */
   private get picksEdges() {
     const pf = this.pickFeature;
-    return !!pf && (pf.type === 'fillet' || pf.type === 'chamfer' || (pf.type === 'axis' && pf.kind === 'edge'));
+    return !!pf && (pf.type === 'fillet' || pf.type === 'chamfer' || pf.type === 'fill' || (pf.type === 'axis' && pf.kind === 'edge'));
   }
 
   private fieldChange(e: Event) {
@@ -1570,6 +1668,10 @@ class PartEditor {
       const id = k.slice(5);
       const on = new Set(val ? [...f.sketches, id] : f.sketches.filter((x) => x !== id));
       f.sketches = this.sketches().map((s) => s.id).filter((x) => on.has(x));
+    } else if (k.startsWith('body:') && f.type === 'stitch') {
+      const id = k.slice(5);
+      const on = new Set(val ? [...f.bodies, id] : f.bodies.filter((x) => x !== id));
+      f.bodies = this.bodyOpts(this.part.features.indexOf(f)).map(([b]) => b).filter((b) => on.has(b));
     } else if (k.startsWith('tool:') && f.type === 'combine') {
       const id = k.slice(5);
       f.tools = val ? [...f.tools, id] : f.tools.filter((x) => x !== id);
@@ -2815,6 +2917,10 @@ class PartEditor {
     const r = await buildPart(this.part);
     if (r.error) return toast(`${this.feature(r.error.feature)?.name ?? 'Erro'}: ${r.error.message}`, 'error', 5000);
     if (!r.mesh) return toast('A peça ainda não tem nenhum sólido: crie um esboço fechado e extrude.', 'error', 4500);
+    if (r.surfaces.length) {
+      const names = r.surfaces.map((id) => `“${this.feature(id)?.name ?? id}”`).join(', ');
+      return toast(`${names} ${r.surfaces.length === 1 ? 'é uma superfície' : 'são superfícies'} sem espessura e não dá para imprimir. Use “Espessar” ou costure até fechar um sólido.`, 'error', 6000);
+    }
     this.close();
     this.opts.onDone(this.part, r.mesh);
   }

@@ -92,6 +92,10 @@ const P: Record<string, string> = {
   emboss: '<rect x="3" y="12" width="18" height="8" rx="1.5"/><path d="M8 12V5h8M12 5v7"/>',
   split: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M2 14l20-4" stroke-dasharray="3 2"/>',
   pushpull: '<rect x="4" y="13" width="16" height="8" rx="1.5"/><path d="M12 3v8M9 6l3-3 3 3"/>',
+  surface: '<path d="M3 15c3-6 6-6 9-3s6 3 9-3"/><path d="M3 15l2 5h14l2-11" opacity=".55"/>',
+  fill: '<path d="M4 9c3-4 13-4 16 0v8c-3 4-13 4-16 0z" stroke-dasharray="3 2"/><path d="M4 13c3 3 13 3 16 0" fill="currentColor" fill-opacity=".2"/>',
+  stitch: '<path d="M3 12h18"/><path d="M6 8l2 8M11 8l2 8M16 8l2 8"/>',
+  thicken: '<path d="M3 10c3-4 6-4 9-1s6 3 9-1"/><path d="M3 16c3-4 6-4 9-1s6 3 9-1"/><path d="M12 9v6" opacity=".6"/>',
   fx: '<path d="M10 4H8a2 2 0 00-2 2v12a2 2 0 01-2 2"/><path d="M4 10h7"/><path d="M14 10l6 8M20 10l-6 8"/>',
   combine: '<circle cx="9" cy="12" r="6"/><circle cx="15" cy="12" r="6"/>',
 };

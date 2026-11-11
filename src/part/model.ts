@@ -405,7 +405,67 @@ export interface CombineFeature {
   keepTools: boolean;
 }
 
-export type SolidModFeature = DraftFeature | RibFeature | PipeFeature | CoilFeature | EmbossFeature | SplitFeature | PushPullFeature | ScaleFeature | MoveFeature | CombineFeature;
+/**
+ * Surface (zero thickness) made from a sketch: its lines and curves pulled straight (`extrude`)
+ * or turned around an axis (`revolve`), or its closed outline filled flat (`patch`).
+ * Always a new body.
+ */
+export interface SurfaceFeature {
+  id: string;
+  type: 'surface';
+  name: string;
+  kind: 'extrude' | 'revolve' | 'patch';
+  sketch: string;
+  distance: number;
+  symmetric: boolean;
+  reverse: boolean;
+  axis: 'x' | 'y' | string;
+  angle: number;
+}
+
+/** Curved patch filling a closed loop of picked edges (e.g. the open end of a surface). */
+export interface FillFeature {
+  id: string;
+  type: 'fill';
+  name: string;
+  edges: V3[];
+}
+
+/** Sew surfaces along shared edges into one; closed ones can become a solid. */
+export interface StitchFeature {
+  id: string;
+  type: 'stitch';
+  name: string;
+  bodies: string[];
+  solid: boolean;
+}
+
+/** Cut away part of a body (usually a surface) with a plane or with another body. */
+export interface TrimFeature {
+  id: string;
+  type: 'trim';
+  name: string;
+  target: string;
+  by: 'plane' | 'body';
+  plane: string;
+  tool: string;
+  /** Plane: keep the side behind the plane instead of the one in front. */
+  flip: boolean;
+  keepTool: boolean;
+}
+
+/** Turn a surface into a solid wall of the given thickness (negative = the other side). */
+export interface ThickenFeature {
+  id: string;
+  type: 'thicken';
+  name: string;
+  target: string;
+  thickness: number;
+}
+
+export type SurfaceOpFeature = SurfaceFeature | FillFeature | StitchFeature | TrimFeature | ThickenFeature;
+
+export type SolidModFeature =DraftFeature | RibFeature | PipeFeature | CoilFeature | EmbossFeature | SplitFeature | PushPullFeature | ScaleFeature | MoveFeature | CombineFeature;
 
 /** A closed profile carried along a path (open or closed lines/arcs of another sketch). */
 export interface SweepFeature {
@@ -464,7 +524,8 @@ export type Feature =
   | ThreadFeature
   | ImportFeature
   | ConstructionFeature
-  | SolidModFeature;
+  | SolidModFeature
+  | SurfaceOpFeature;
 
 /** Sketches a feature is built from. */
 export function featureSketches(f: Feature): string[] {
@@ -473,6 +534,7 @@ export function featureSketches(f: Feature): string[] {
   if (f.type === 'loft') return f.sketches;
   if (f.type === 'rib') return [f.sketch];
   if (f.type === 'pipe') return [f.path];
+  if (f.type === 'surface') return [f.sketch];
   return [];
 }
 
@@ -488,6 +550,10 @@ export function featureRefs(f: Feature): string[] {
   if (f.type === 'coil' || f.type === 'move') out.push(f.axis);
   if (f.type === 'scale') out.push(f.point);
   if (f.type === 'combine') out.push(f.target, ...f.tools);
+  if (f.type === 'surface' && f.kind === 'revolve') out.push(f.axis);
+  if (f.type === 'stitch') out.push(...f.bodies);
+  if (f.type === 'trim') out.push(f.target, f.by === 'plane' ? f.plane : f.tool);
+  if (f.type === 'thicken') out.push(f.target);
   return out;
 }
 
@@ -634,6 +700,7 @@ export const featureLabel: Record<Feature['type'], string> = {
   sweep: 'Varredura', loft: 'Loft', thread: 'Rosca', import: 'Importado', plane: 'Plano', axis: 'Eixo', point: 'Ponto',
   draft: 'Ângulo de saída', rib: 'Nervura', pipe: 'Cano', coil: 'Mola', emboss: 'Gravação', split: 'Divisão', pushpull: 'Empurrar/puxar', scale: 'Escala',
   move: 'Mover', combine: 'Combinar',
+  surface: 'Superfície', fill: 'Remendo', stitch: 'Costura', trim: 'Aparar', thicken: 'Espessar',
 };
 
 export function nextName(part: PartDef, type: Feature['type']) {
