@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { store, uid, clone } from './store';
-import { decompose, localBox, nodeMatrix, renderGeometry, resizedTransform, worldBounds } from './geometry';
+import { splitAtHeight, decompose, localBox, nodeMatrix, renderGeometry, resizedTransform, worldBounds } from './geometry';
 import { createNode } from './shapes';
 import { filaments } from './filaments';
 import { DEFAULT_FONT_ID, loadFont, textToPolygons } from './fonts';
@@ -153,6 +153,33 @@ function boundsOf(nodes: SceneNode[]) {
 }
 
 /** Tinkercad-style group: solids are united, holes are subtracted. */
+/**
+ * Splits a solid mesh at a height: the base stays one object and every loose piece above
+ * (letters, logo...) becomes its own object, in the same place, so each can have its own colour.
+ */
+export function splitByHeight(id: string, z: number): number {
+  const n = store.find(id);
+  if (!n || n.locked || n.kind !== 'mesh') return 0;
+  const r = splitAtHeight(n, store.doc.assets, z);
+  if (!r) return 0;
+  const made: SceneNode[] = [];
+  const assets: Record<string, MeshAsset> = {};
+  const add = (a: MeshAsset, name: string) => {
+    const asset = uid();
+    assets[asset] = a;
+    made.push({ ...clone(n), id: uid(), name, params: { ...n.params, asset } });
+  };
+  if (r.base) add(r.base, `${n.name} (base)`);
+  r.pieces.forEach((p, i) => add(p, `${n.name} ${i + 1}`));
+  store.commit((doc) => {
+    Object.assign(doc.assets, assets);
+    const at = doc.nodes.findIndex((x) => x.id === id);
+    doc.nodes.splice(at, 1, ...made);
+  });
+  store.select(made.map((m) => m.id));
+  return r.pieces.length;
+}
+
 export function groupSelection() {
   const sel = store.selected.filter((n) => !n.locked);
   if (sel.length < 2) return;

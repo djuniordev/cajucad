@@ -241,6 +241,85 @@ export function manifoldFromAsset(asset: MeshAsset): Manifold | null {
   }
 }
 
+const assetOfSolid = (m: Manifold): MeshAsset => {
+  const mesh = m.getMesh();
+  const np = mesh.numProp;
+  const positions: number[] = [];
+  for (let i = 0; i < mesh.vertProperties.length; i += np) positions.push(mesh.vertProperties[i], mesh.vertProperties[i + 1], mesh.vertProperties[i + 2]);
+  return { positions, indices: Array.from(mesh.triVerts) };
+};
+
+const CUT_EPS = 0.01;
+
+/**
+ * Height (local Z) where a relief starts: among the flat upward-facing levels of the
+ * object (not its top or bottom), the one that cuts the most loose pieces (letters, logo...).
+ */
+export function suggestCutHeight(n: SceneNode, assets: DesignDoc['assets']): { z: number; top: number } | null {
+  const s = solidOf(n, assets);
+  if (!s) return null;
+  const mesh = s.getMesh();
+  const np = mesh.numProp;
+  const P = mesh.vertProperties, T = mesh.triVerts;
+  const v = (i: number) => [P[T[i] * np], P[T[i] * np + 1], P[T[i] * np + 2]];
+  let zmin = Infinity, zmax = -Infinity;
+  for (let i = 2; i < P.length; i += np) {
+    zmin = Math.min(zmin, P[i]);
+    zmax = Math.max(zmax, P[i]);
+  }
+  const levels = new Map<string, { z: number; area: number }>();
+  for (let t = 0; t < T.length; t += 3) {
+    const a = v(t), b = v(t + 1), c = v(t + 2);
+    if (Math.abs(a[2] - b[2]) > 1e-4 || Math.abs(a[2] - c[2]) > 1e-4) continue;
+    const cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    if (cross <= 0) continue; // facing up only
+    const k = a[2].toFixed(2);
+    const l = levels.get(k) ?? { z: a[2], area: 0 };
+    l.area += cross / 2;
+    levels.set(k, l);
+  }
+  const cands = [...levels.values()]
+    .filter((l) => l.z > zmin + 0.05 && l.z < zmax - 0.05 && l.area >= 5)
+    .sort((p, q) => q.area - p.area)
+    .slice(0, 8);
+  let best: { z: number; count: number; area: number } | null = null;
+  for (const l of cands) {
+    // Just above the step: cutting exactly on it leaves slivers of the floor.
+    const [top, bottom] = s.splitByPlane([0, 0, 1], l.z + CUT_EPS);
+    let count = 0;
+    if (!top.isEmpty()) {
+      const parts = top.decompose();
+      count = parts.length;
+      parts.forEach((m) => m.delete());
+    }
+    top.delete();
+    bottom.delete();
+    if (!best || count > best.count || (count === best.count && l.area > best.area)) best = { z: l.z + CUT_EPS, count, area: l.area };
+  }
+  return best && best.count > 0 ? { z: best.z, top: zmax } : null;
+}
+
+/**
+ * Cuts a solid with a horizontal plane (local Z) and splits what is above into its loose
+ * pieces (letters, logo...). The first result is everything below; the pieces keep their place.
+ * Null when nothing is above the plane.
+ */
+export function splitAtHeight(n: SceneNode, assets: DesignDoc['assets'], z: number): { base: MeshAsset | null; pieces: MeshAsset[] } | null {
+  const s = solidOf(n, assets);
+  if (!s) return null;
+  const [top, bottom] = s.splitByPlane([0, 0, 1], z);
+  const parts = top.isEmpty() ? [] : top.decompose();
+  top.delete();
+  const sorted = parts
+    .map((m) => ({ m, x: m.boundingBox().min[0], y: m.boundingBox().min[1] }))
+    .sort((p, q) => p.x - q.x || p.y - q.y);
+  const pieces = sorted.map((p) => assetOfSolid(p.m));
+  const base = bottom.isEmpty() ? null : assetOfSolid(bottom);
+  sorted.forEach((p) => p.m.delete());
+  bottom.delete();
+  return pieces.length ? { base, pieces } : null;
+}
+
 /** True when the 2D outline produces a non-empty region. */
 export function polygonsArea(polys: Polygons) {
   const cs: CrossSection = new wasm.CrossSection(polys, 'NonZero');

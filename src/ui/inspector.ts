@@ -2,7 +2,7 @@ import { store } from '../core/store';
 import { KIND_LABEL, PALETTE, shapeDef } from '../core/shapes';
 import * as cmd from '../core/commands';
 import { getFace, isFontAvailable, previewCss, DEFAULT_FONT_ID } from '../core/fonts';
-import { manifoldFromAsset } from '../core/geometry';
+import { manifoldFromAsset, suggestCutHeight } from '../core/geometry';
 import type { Joint, JointKind, SceneNode } from '../core/types';
 import { el, esc, numberField, sliderRow, toast } from './dom';
 import { icon } from './icons';
@@ -187,9 +187,49 @@ export class Inspector {
     if (n.kind === 'mesh' && !this.isSolidMesh(n)) {
       frag.appendChild(el(`<div class="warn">Esta malha não é um sólido fechado (tem buracos ou faces soltas). Ela é exibida, mas não entra em furos, grupos nem na exportação STL.</div>`));
     }
+    if (n.kind === 'mesh' && !isPart(n) && this.isSolidMesh(n)) frag.appendChild(this.paintParts(n));
     frag.appendChild(this.actions(n));
     frag.appendChild(this.assembly(n));
     return wrapper;
+  }
+
+  /** Cut height chosen per object for "Pintar por partes". */
+  private cutAt = new Map<string, number>();
+
+  /** Splits a relief (letters, logo) from its base so each piece can get its own colour. */
+  private paintParts(n: SceneNode) {
+    const s = el(`<div class="section"><div class="section-title">Pintar por partes</div></div>`);
+    const sug = suggestCutHeight(n, store.doc.assets);
+    if (!sug) {
+      s.appendChild(el(`<div class="hint" style="margin-top:0">Não achei um relevo nesta peça para separar.</div>`));
+      return s;
+    }
+    const sz = n.scale[2] || 1;
+    const cur = this.cutAt.get(n.id) ?? sug.z;
+    s.appendChild(
+      this.keyed('cut-z', sliderRow({
+        label: 'Altura do corte',
+        value: cur * sz,
+        min: 0,
+        max: Math.max(sug.top * sz, cur * sz),
+        step: 0.1,
+        unit: 'mm',
+        onCommit: (v) => {
+          this.cutAt.set(n.id, v / sz);
+          this.render();
+        },
+      })),
+    );
+    const b = el<HTMLButtonElement>(`<button class="btn soft" style="width:100%">${icon('split', 16)}<span>Separar o relevo em partes</span></button>`);
+    b.disabled = !!n.locked;
+    b.onclick = () => {
+      const count = cmd.splitByHeight(n.id, cur);
+      if (!count) return toast('Nada acima dessa altura para separar.', 'error');
+      toast(`${count} partes separadas. Clique em cada uma para pintar; use Agrupar (Ctrl G) para mover tudo junto.`, 'info', 6000);
+    };
+    s.appendChild(b);
+    s.appendChild(el(`<div class="hint">Corta na altura marcada (sugerida pelo degrau da peça): o que sobe vira uma parte para cada letra ou desenho, no mesmo lugar, e cada uma aceita a sua cor.</div>`));
+    return s;
   }
 
   private assembly(n: SceneNode) {
