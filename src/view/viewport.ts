@@ -61,6 +61,8 @@ export class Viewport {
   /** Called when the user types a size into an on-screen dimension (world axis, mm). */
   onDimensionEdit?: (axis: 0 | 1 | 2, mm: number) => void;
   onContextMenu?: (x: number, y: number) => void;
+  /** Double click on a part; returns true when it was handled (e.g. opened for editing). */
+  onDoubleClickNode?: (id: string) => boolean;
 
   constructor(private host: HTMLElement) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, powerPreference: 'high-performance' });
@@ -639,7 +641,11 @@ export class Viewport {
       if (id && !store.selection.has(id)) store.select([id]);
       if (id || store.selection.size) this.onContextMenu?.(e.clientX, e.clientY);
     });
-    el.addEventListener('dblclick', () => this.frameSelection());
+    el.addEventListener('dblclick', (e) => {
+      const id = this.pick(e.clientX, e.clientY);
+      if (id && this.onDoubleClickNode?.(id)) return;
+      this.frameSelection();
+    });
   }
 
   // ---------- left-drag: move objects along the workplane ----------

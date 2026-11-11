@@ -74,7 +74,8 @@ const topbar = el(`
     </div>
     <div class="spacer"></div>
     <div class="cluster">
-      <button class="btn" data-act="import">${icon('import')}<span class="lbl">Importar</span></button>
+      <button class="btn" data-act="sketch" data-tip="Esboço 2D: desenha no chão e vira uma peça paramétrica">${icon('sketch')}<span class="lbl">Esboço</span></button>
+      <button class="btn icon-only" data-act="import" data-tip="Importar STL, OBJ, 3MF, SVG ou fonte">${icon('import')}</button>
       ${desktop ? `<button class="btn" data-act="print" data-tip="Fatiar e imprimir">${icon('printer')}<span class="lbl">Imprimir</span></button>` : ''}
       <button class="btn primary" data-act="export">${icon('export', 17)}<span class="lbl">Exportar</span></button>
       <button class="btn icon-only" data-act="theme" data-tip="Tema"></button>
@@ -168,6 +169,12 @@ async function boot() {
   setAssemblyViewport(viewport);
   applyTheme();
   viewport.onContextMenu = (x, y) => contextMenu(x, y);
+  viewport.onDoubleClickNode = (id) => {
+    const n = store.find(id);
+    if (!n || n.locked || !isPart(n)) return false;
+    editPart(id);
+    return true;
+  };
   viewport.onDimensionEdit = (axis, mm) => {
     const sel = store.selected;
     if (sel.length !== 1) return toast('Selecione um objeto só para digitar a medida.');
@@ -350,6 +357,7 @@ topbar.addEventListener('click', (e) => {
     case 'align': return alignMenu(b);
     case 'mirror': return showMenu(mirrorItems(), b);
     case 'assembly': return assemblyMenu(b);
+    case 'sketch': return newPart(viewTarget(), 'XY');
     case 'import': return fileInput.click();
     case 'export': return exportMenu(b);
     case 'print': return void openPrintDialog();

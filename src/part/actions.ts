@@ -9,12 +9,13 @@ import { emptyPart, parsePart, type PartDef } from './model';
 export const isPart = (n: SceneNode | undefined) => !!n && n.kind === 'mesh' && !!parsePart(n.params.part);
 
 /** Open the part workspace for a new part; it lands in the scene at `at` when finished. */
-export function newPart(at: Vec3 = [0, 0, 0]) {
+export function newPart(at: Vec3 = [0, 0, 0], startSketch?: string) {
   const count = store.doc.nodes.filter(isPart).length + 1;
   const name = `Peça ${count}`;
   openPartEditor({
     title: name,
     part: emptyPart(),
+    startSketch,
     onDone: (part, mesh) => {
       const asset = uid();
       // Rest the part on the workplane even when it was modelled below it.

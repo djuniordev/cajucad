@@ -157,6 +157,8 @@ const num = (s: string) => Number(String(s).replace(',', '.'));
 export interface PartEditorOptions {
   title: string;
   part: PartDef;
+  /** Plane to start a sketch on right away (new parts only). */
+  startSketch?: string;
   onDone(part: PartDef, mesh: PartMesh): void;
 }
 
@@ -311,6 +313,7 @@ class PartEditor {
     if (!this.part.features.length) this.status.textContent = 'Comece criando um esboço num plano.';
     this.renderSide();
     this.rebuild();
+    if (opts.startSketch && !this.part.features.length) this.newSketch(opts.startSketch);
   }
 
   // ---------- helpers ----------
