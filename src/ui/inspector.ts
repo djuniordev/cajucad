@@ -3,13 +3,13 @@ import { KIND_LABEL, PALETTE, shapeDef } from '../core/shapes';
 import * as cmd from '../core/commands';
 import { getFace, isFontAvailable, previewCss, DEFAULT_FONT_ID } from '../core/fonts';
 import { manifoldFromAsset } from '../core/geometry';
-import type { SceneNode } from '../core/types';
+import type { Joint, JointKind, SceneNode } from '../core/types';
 import { el, esc, numberField, sliderRow, toast } from './dom';
 import { icon } from './icons';
 import { openFontPicker } from './fontPicker';
 import { filaments } from '../core/filaments';
-import { editPart, isPart } from '../part/actions';
-import { collisions, jointOf, removeJoint, updateJoint } from '../core/assembly';
+import { componentCount, editPart, insertLinkedCopy, isPart, unlinkCopy } from '../part/actions';
+import { JOINT_LABEL, JOINT_VALUES, collisions, jointOf, motionPlaying, playJoint, removeJoint, stopJoint, updateJoint } from '../core/assembly';
 import { startSnap } from './snapMode';
 
 const AXES = ['x', 'y', 'z'] as const;
@@ -205,31 +205,85 @@ export class Inspector {
     }
     const base = store.find(j.b);
     s.appendChild(el(`<div class="hint" style="margin-top:0">Junta com <b>${esc(base?.name ?? '?')}</b>: segue quando ela se move.</div>`));
-    const seg = el(`<div class="segmented" style="margin:8px 0;width:100%"></div>`);
-    for (const [k, label] of [['rigid', 'Rígida'], ['revolute', 'Giratória'], ['slider', 'Deslizante']] as const) {
-      const b = el<HTMLButtonElement>(`<button class="btn ${j.kind === k ? 'active' : ''}" style="flex:1">${label}</button>`);
+    const seg = el(`<div class="joint-kinds"></div>`);
+    for (const k of Object.keys(JOINT_LABEL) as JointKind[]) {
+      const b = el<HTMLButtonElement>(`<button class="btn ${j.kind === k ? 'active' : ''}">${JOINT_LABEL[k]}</button>`);
       b.onclick = () => updateJoint(j.id, { kind: k });
       seg.appendChild(b);
     }
     s.appendChild(seg);
-    if (j.kind !== 'rigid') {
-      const rev = j.kind === 'revolute';
+    const move = (patch: Parameters<typeof updateJoint>[1]) => {
+      const hit = updateJoint(j.id, patch);
+      if (hit) {
+        toast(`Encostou em “${hit}”: a peça para aí.`, 'error', 3500);
+        this.render();
+      }
+    };
+    for (const v of JOINT_VALUES[j.kind]) {
+      const cur = j[v.key] ?? 0;
       s.appendChild(
-        this.keyed('joint-v', sliderRow({
-          label: rev ? 'Ângulo' : 'Deslocamento',
-          value: j.value,
-          min: rev ? -180 : -50,
-          max: rev ? 180 : 50,
-          step: rev ? 1 : 0.5,
-          unit: rev ? '°' : 'mm',
-          onCommit: (v) => updateJoint(j.id, { value: rev ? wrapDeg(v) : v }),
+        this.keyed(`joint-${v.key}`, sliderRow({
+          label: v.label,
+          value: cur,
+          min: v.angle ? -180 : Math.min(-50, cur),
+          max: v.angle ? 180 : Math.max(50, cur),
+          step: v.angle ? 1 : 0.5,
+          unit: v.angle ? '°' : 'mm',
+          onCommit: (x) => move({ [v.key]: v.angle ? wrapDeg(x) : x }),
         })),
       );
+    }
+    if (j.kind !== 'rigid') {
+      const c = el(`<label class="check-row"><input type="checkbox" ${j.contact ? 'checked' : ''}/> <span>Contato: parar ao encostar em outra peça</span></label>`);
+      c.querySelector('input')!.onchange = (e) => updateJoint(j.id, { contact: (e.target as HTMLInputElement).checked });
+      s.appendChild(c);
+      s.appendChild(this.motionStudy(j));
     }
     const free = el<HTMLButtonElement>(`<button class="btn soft" style="width:100%;margin-top:8px">${icon('unlock', 16)}<span>Soltar junta</span></button>`);
     free.onclick = () => removeJoint(j.id);
     s.appendChild(free);
     return s;
+  }
+
+  /** Remembered between renders (the panel is rebuilt on every frame of the animation). */
+  private motion = { key: 'value' as 'value' | 'value2' | 'value3', from: -45, to: 45, seconds: 3 };
+
+  private motionStudy(j: Joint) {
+    const vals = JOINT_VALUES[j.kind];
+    if (!vals.some((v) => v.key === this.motion.key)) this.motion.key = vals[0].key;
+    const m = this.motion;
+    const box = el(`<div class="motion-study">
+      <div class="section-sub">Estudo de movimento</div>
+      ${vals.length > 1 ? `<select class="ms-key">${vals.map((v) => `<option value="${v.key}" ${v.key === m.key ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}</select>` : ''}
+      <div class="ms-row">
+        <label>De <input class="ms-from" inputmode="decimal" value="${m.from}"/></label>
+        <label>até <input class="ms-to" inputmode="decimal" value="${m.to}"/></label>
+        <label><input class="ms-sec" inputmode="decimal" value="${m.seconds}"/> s</label>
+      </div>
+      <button class="btn soft ms-play" style="width:100%">${icon(motionPlaying() ? 'stop' : 'play', 16)}<span>${motionPlaying() ? 'Parar' : 'Animar (ida e volta)'}</span></button>
+    </div>`);
+    const num = (sel: string, k: 'from' | 'to' | 'seconds') => {
+      const i = box.querySelector<HTMLInputElement>(sel)!;
+      i.addEventListener('keydown', (e) => e.stopPropagation());
+      i.onchange = () => {
+        const v = Number(i.value.replace(',', '.'));
+        if (Number.isFinite(v)) m[k] = k === 'seconds' ? Math.max(0.3, Math.min(60, v)) : v;
+      };
+    };
+    num('.ms-from', 'from');
+    num('.ms-to', 'to');
+    num('.ms-sec', 'seconds');
+    const sel = box.querySelector<HTMLSelectElement>('.ms-key');
+    if (sel) sel.onchange = () => (m.key = sel.value as typeof m.key);
+    box.querySelector<HTMLButtonElement>('.ms-play')!.onclick = () => {
+      if (motionPlaying()) return stopJoint();
+      playJoint(j.id, m.key, m.from, m.to, m.seconds, (hit) => {
+        if (hit) toast(`No movimento, a peça encostou em “${hit}”.`, 'error', 4000);
+        this.render();
+      });
+      this.render();
+    };
+    return box;
   }
 
   private isSolidMesh(n: SceneNode) {
@@ -356,6 +410,14 @@ export class Inspector {
     if (isPart(n)) {
       add('part', 'Editar peça (histórico)', () => editPart(n.id), true);
       (row.lastElementChild as HTMLElement).style.flexBasis = '100%';
+      const copies = componentCount(n);
+      add('link', 'Cópia ligada', () => insertLinkedCopy(n.id));
+      (row.lastElementChild as HTMLElement).dataset.tip = 'Nova cópia desta peça: editar uma muda todas (componente)';
+      if (copies > 1) {
+        s.appendChild(el(`<div class="hint" style="margin:0 0 6px">Componente com <b>${copies}</b> cópias ligadas: editar uma muda todas.</div>`));
+        add('unlock', 'Desligar', () => unlinkCopy(n.id));
+        (row.lastElementChild as HTMLElement).dataset.tip = 'Esta cópia passa a ser uma peça independente';
+      }
     }
     if (n.kind === 'group') add('ungroup', 'Desagrupar', () => cmd.ungroupSelection(), true);
     add('copy', 'Duplicar', () => cmd.duplicateSelection([10, 10, 0]));

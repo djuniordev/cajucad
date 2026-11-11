@@ -54,6 +54,14 @@ class Store {
     this.emitDoc();
   }
 
+  /** Change the document for display only (animations): no undo step, hooks still run. */
+  preview(mutate: (doc: DesignDoc) => void) {
+    const snaps = this.hooks.map((h) => h.before(this.doc));
+    mutate(this.doc);
+    this.hooks.forEach((h, i) => h.after(this.doc, snaps[i]));
+    this.emitDoc();
+  }
+
   /** Replace the whole document (open file, restore autosave). */
   load(doc: DesignDoc, resetHistory = true) {
     this.doc = doc;

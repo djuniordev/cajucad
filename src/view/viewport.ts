@@ -7,7 +7,7 @@ import { store } from '../core/store';
 import { colorSig, decompose, nodeMatrix, rawAssetGeometry, renderGeometry, renderPieces, shapeKey, worldBounds } from '../core/geometry';
 import { ResizeHandles } from './handles';
 import type { SceneNode, Vec3 } from '../core/types';
-import type { SurfaceHit } from '../core/assembly';
+import { explodeOffsets, onExplode, type SurfaceHit } from '../core/assembly';
 import { settings } from '../core/settings';
 
 THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
@@ -172,6 +172,7 @@ export class Viewport {
     this.resize();
     this.applyTheme();
     store.onDoc(() => this.sync());
+    onExplode(() => this.sync());
     store.onSelection(() => this.updateSelection());
     settings.on(() => this.applySettings());
     this.applySettings();
@@ -233,6 +234,43 @@ export class Viewport {
     return n.kind === 'group' ? `${k}#${colorSig(n)}` : k;
   }
 
+  private marker: THREE.Group | null = null;
+
+  /** Small target drawn at a point (centre of mass), or none. */
+  showMarker(p: Vec3 | null, label = '') {
+    if (this.marker) {
+      this.scene.remove(this.marker);
+      this.marker.traverse((o) => {
+        (o as THREE.Mesh).geometry?.dispose();
+        if (o instanceof CSS2DObject) o.element.remove();
+      });
+      this.marker = null;
+    }
+    if (!p) return;
+    const g = new THREE.Group();
+    const mat = new THREE.MeshBasicMaterial({ color: 0x2f8cff, depthTest: false, transparent: true, opacity: 0.95 });
+    const ball = new THREE.Mesh(new THREE.SphereGeometry(1.6, 20, 14), mat);
+    ball.renderOrder = 20;
+    g.add(ball);
+    const lm = new THREE.LineBasicMaterial({ color: 0x2f8cff, depthTest: false });
+    for (const ax of [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)]) {
+      const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([ax.clone().multiplyScalar(-6), ax.clone().multiplyScalar(6)]), lm);
+      line.renderOrder = 20;
+      g.add(line);
+    }
+    if (label) {
+      const tag = document.createElement('div');
+      tag.className = 'com-tag';
+      tag.textContent = label;
+      const o = new CSS2DObject(tag);
+      o.position.set(0, 0, 5);
+      g.add(o);
+    }
+    g.position.set(...p);
+    this.scene.add(g);
+    this.marker = g;
+  }
+
   private sync() {
     const seen = new Set<string>();
     for (const n of store.doc.nodes) {
@@ -244,7 +282,9 @@ export class Viewport {
         v = this.buildView(n, key);
         this.views.set(n.id, v);
       }
-      v.root.matrix.copy(nodeMatrix(n));
+      // The exploded view only moves what is drawn.
+      const off = explodeOffsets.get(n.id);
+      v.root.matrix.copy(off ? new THREE.Matrix4().makeTranslation(off[0], off[1], off[2]).multiply(nodeMatrix(n)) : nodeMatrix(n));
       v.root.matrixWorldNeedsUpdate = true;
       v.root.visible = !n.hidden;
       const style = `${n.color}|${n.hole}|${n.locked}`;

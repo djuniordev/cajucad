@@ -60,15 +60,25 @@ export interface Joint {
   id: string;
   a: string;
   b: string;
-  kind: 'rigid' | 'revolute' | 'slider';
+  kind: JointKind;
   /** a's matrix relative to b's, with the joint at zero (column-major 4×4). */
   rel: number[];
   /** Joint origin and axis in b's local frame. */
   origin: Vec3;
   axis: Vec3;
-  /** Degrees (revolute) or millimetres (slider). */
+  /**
+   * Revolute: angle. Slider: distance. Cylindrical: angle, then `value2` slide along the axis.
+   * Spherical: turns about the joint's X, Y (`value2`) and the axis (`value3`).
+   * Planar: slide along the face's X, Y (`value2`) and turn about the axis (`value3`).
+   */
   value: number;
+  value2?: number;
+  value3?: number;
+  /** Stop motion that would push this part into another one. */
+  contact?: boolean;
 }
+
+export type JointKind = 'rigid' | 'revolute' | 'slider' | 'cylindrical' | 'spherical' | 'planar';
 
 export interface DesignDoc {
   version: 1;

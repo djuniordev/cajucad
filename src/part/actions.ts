@@ -44,11 +44,57 @@ export function editPart(id: string) {
         const n = findIn(doc.nodes, id);
         if (!n) return;
         doc.assets[asset] = toAsset(mesh);
-        n.params.asset = asset;
-        n.params.part = JSON.stringify(next);
+        // Linked copies of a component all take the new geometry.
+        const comp = n.params.component;
+        for (const x of comp ? allNodes(doc.nodes).filter((m) => m.params.component === comp) : [n]) {
+          x.params.asset = asset;
+          x.params.part = JSON.stringify(next);
+        }
       });
     },
   });
+}
+
+/** A copy of a part that stays linked to it: editing any copy changes all of them. */
+export function insertLinkedCopy(id: string) {
+  const src = store.find(id);
+  if (!src || !isPart(src)) return;
+  const comp = String(src.params.component || uid());
+  const copy = structuredClone(src);
+  copy.id = uid();
+  copy.params.component = comp;
+  copy.position = [src.position[0] + 10, src.position[1] + 10, src.position[2]];
+  const base = src.name.replace(/\s*\(\d+\)$/, '');
+  const count = allNodes(store.doc.nodes).filter((n) => n.params.component === comp).length || 1;
+  copy.name = `${base} (${count + 1})`;
+  store.commit((doc) => {
+    const s = doc.nodes.find((n) => n.id === id);
+    if (s) s.params.component = comp;
+    doc.nodes.push(copy);
+  });
+  store.select([copy.id]);
+}
+
+/** How many linked copies share this part's component (1 = not linked). */
+export function componentCount(n: SceneNode) {
+  const comp = n.params.component;
+  return comp ? allNodes(store.doc.nodes).filter((x) => x.params.component === comp).length : 1;
+}
+
+/** Make this copy independent again. */
+export function unlinkCopy(id: string) {
+  store.commit((doc) => {
+    const n = findIn(doc.nodes, id);
+    if (n) delete n.params.component;
+    // A component left with a single copy is just a part.
+    const left = new Map<string, SceneNode[]>();
+    for (const x of allNodes(doc.nodes)) if (x.params.component) left.set(String(x.params.component), [...(left.get(String(x.params.component)) ?? []), x]);
+    for (const list of left.values()) if (list.length === 1) delete list[0].params.component;
+  });
+}
+
+function allNodes(nodes: SceneNode[]): SceneNode[] {
+  return nodes.flatMap((n) => [n, ...(n.children ? allNodes(n.children) : [])]);
 }
 
 const toAsset = (m: PartMesh) => ({ positions: m.positions, indices: m.indices });

@@ -14,6 +14,7 @@ import { openPrintDialog } from './ui/printDialog';
 import { Viewport, type GizmoMode } from './view/viewport';
 import { Inspector } from './ui/inspector';
 import { setSnapViewport } from './ui/snapMode';
+import { assemblyMenu, setAssemblyViewport } from './ui/assemblyTools';
 import { el, esc, showMenu, toast, closeMenu, type MenuItem } from './ui/dom';
 import { brandLogo, icon, shapeIcon } from './ui/icons';
 import { initUpdateBanner } from './ui/updateBanner';
@@ -69,6 +70,7 @@ const topbar = el(`
       <button class="btn icon-only" data-act="hole" data-tip="Furo / sólido (H)">${icon('hole')}</button>
       <button class="btn icon-only" data-act="align" data-tip="Alinhar">${icon('align')}</button>
       <button class="btn icon-only" data-act="mirror" data-tip="Espelhar">${icon('mirror')}</button>
+      <button class="btn icon-only" data-act="assembly" data-tip="Montagem: vista explodida, lista de peças e centro de massa">${icon('layers')}</button>
     </div>
     <div class="spacer"></div>
     <div class="cluster">
@@ -155,6 +157,7 @@ async function boot() {
   await initGeometry();
   viewport = new Viewport(stage);
   setSnapViewport(viewport);
+  setAssemblyViewport(viewport);
   applyTheme();
   viewport.onContextMenu = (x, y) => contextMenu(x, y);
   viewport.onDimensionEdit = (axis, mm) => {
@@ -338,6 +341,7 @@ topbar.addEventListener('click', (e) => {
     case 'hole': return cmd.toggleHole();
     case 'align': return alignMenu(b);
     case 'mirror': return showMenu(mirrorItems(), b);
+    case 'assembly': return assemblyMenu(b);
     case 'import': return fileInput.click();
     case 'export': return exportMenu(b);
     case 'print': return void openPrintDialog();
