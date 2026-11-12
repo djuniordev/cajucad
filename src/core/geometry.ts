@@ -249,13 +249,18 @@ const assetOfSolid = (m: Manifold): MeshAsset => {
   return { positions, indices: Array.from(mesh.triVerts) };
 };
 
+/** Union of many solids at once (much cheaper than adding them one by one). Inputs are not deleted. */
+export function unionSolids(list: Manifold[]): Manifold {
+  return wasm.Manifold.union(list);
+}
+
 const CUT_EPS = 0.01;
 
 /**
  * Height (local Z) where a relief starts: among the flat upward-facing levels of the
  * object (not its top or bottom), the one that cuts the most loose pieces (letters, logo...).
  */
-export function suggestCutHeight(n: SceneNode, assets: DesignDoc['assets']): { z: number; top: number } | null {
+export function suggestCutHeight(n: SceneNode, assets: DesignDoc['assets']): { z: number | null; top: number; bottom: number } | null {
   const s = solidOf(n, assets);
   if (!s) return null;
   const mesh = s.getMesh();
@@ -296,7 +301,7 @@ export function suggestCutHeight(n: SceneNode, assets: DesignDoc['assets']): { z
     bottom.delete();
     if (!best || count > best.count || (count === best.count && l.area > best.area)) best = { z: l.z + CUT_EPS, count, area: l.area };
   }
-  return best && best.count > 0 ? { z: best.z, top: zmax } : null;
+  return { z: best && best.count > 0 ? best.z : null, top: zmax, bottom: zmin };
 }
 
 /**

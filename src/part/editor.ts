@@ -162,19 +162,27 @@ export interface PartEditorOptions {
   onDone(part: PartDef, mesh: PartMesh): void;
 }
 
+/** True while an editor is loading or open: a second click on "Esboço" must not stack another one. */
+let editorBusy = false;
+
 export async function openPartEditor(opts: PartEditorOptions) {
+  if (editorBusy || document.body.classList.contains('part-open')) return;
+  editorBusy = true;
   const wait = el(`<div class="pe-loading"><div class="spinner"></div><div>Carregando o motor de modelagem…</div></div>`);
   document.body.appendChild(wait);
   try {
     await Promise.all([loadKernel(), loadSolver()]);
   } catch (e) {
     toast(`Não consegui carregar o motor de modelagem: ${(e as Error).message}`, 'error', 6000);
+    editorBusy = false;
     return;
   } finally {
     wait.remove();
   }
   // Threads are cut on the mesh with the app's Manifold module.
   provideManifold(manifoldApi());
+  // The editor sets `part-open` on the body while it lives; that is what keeps a new one out.
+  editorBusy = false;
   new PartEditor(opts);
 }
 

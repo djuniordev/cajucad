@@ -81,6 +81,9 @@ class FilamentStore {
       const prev = old.find((f) => f.tray === t.id && f.color === t.color && f.type === (t.type || 'PLA'));
       next.push(prev ?? { id: Math.random().toString(36).slice(2, 9), source: 'ams', tray: t.id, color: t.color, type: t.type || 'PLA', name: t.name || t.type || 'Filamento' });
     }
+    // Same trays as before: stay quiet, or every AMS readout would redraw the panels and close open menus.
+    const same = old.length === next.length && next.every((f, i) => old[i] === f || (old[i].id === f.id && old[i].tray === f.tray && old[i].color === f.color && old[i].type === f.type && old[i].name === f.name));
+    if (same) return old;
     this.items = [...this.items.filter((f) => f.source !== 'ams'), ...next];
     this.save();
     return next;

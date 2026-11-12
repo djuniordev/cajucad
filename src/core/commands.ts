@@ -159,7 +159,7 @@ function boundsOf(nodes: SceneNode[]) {
  */
 export function splitByHeight(id: string, z: number): number {
   const n = store.find(id);
-  if (!n || n.locked || n.kind !== 'mesh') return 0;
+  if (!n || n.locked || n.kind === 'group' || n.hole || n.params.part) return 0;
   const r = splitAtHeight(n, store.doc.assets, z);
   if (!r) return 0;
   const made: SceneNode[] = [];
@@ -167,7 +167,8 @@ export function splitByHeight(id: string, z: number): number {
   const add = (a: MeshAsset, name: string) => {
     const asset = uid();
     assets[asset] = a;
-    made.push({ ...clone(n), id: uid(), name, params: { ...n.params, asset } });
+    // Every piece is a plain mesh now, whatever the object was (box, cylinder, text...).
+    made.push({ ...clone(n), id: uid(), name, kind: 'mesh', params: { asset } });
   };
   if (r.base) add(r.base, `${n.name} (base)`);
   r.pieces.forEach((p, i) => add(p, `${n.name} ${i + 1}`));

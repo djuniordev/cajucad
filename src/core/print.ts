@@ -1,5 +1,5 @@
 import type { Manifold } from 'manifold-3d';
-import { nodeMatrix, piecesOf, worldSolid } from './geometry';
+import { nodeMatrix, piecesOf, unionSolids, worldSolid } from './geometry';
 import { meshToStl } from './io';
 import { MATCH_DISTANCE, colorDistance, filaments, nearestByColor, type Filament } from './filaments';
 import type { DesignDoc, SceneNode } from './types';
@@ -187,6 +187,88 @@ function bodiesOf(node: SceneNode, assets: DesignDoc['assets']): Body[] {
   }));
 }
 
+/**
+ * A colour that hangs in the air (letters on a base, a top coat...) cannot be printed as its own
+ * object: the slicer drops it to the bed, over the part below. Instead it gets a column down to the
+ * bed, taking that volume from the bodies underneath. The total volume does not change; only the
+ * colour of the column does.
+ */
+/**
+ * Bodies of the same colour that touch are one object (the letters of a logo cut from a base that
+ * share its colour). Without this each piece would be sliced as an object of its own.
+ */
+function mergeTouching(bodies: Body[], slotOf: number[]): Body[] {
+  const boxes = bodies.map((b) => b.solid.boundingBox());
+  const parent = bodies.map((_, i) => i);
+  const find = (i: number): number => (parent[i] === i ? i : (parent[i] = find(parent[i])));
+  const eps = 0.01;
+  for (let i = 0; i < bodies.length; i++) {
+    for (let j = i + 1; j < bodies.length; j++) {
+      if (slotOf[i] !== slotOf[j]) continue;
+      const a = boxes[i], b = boxes[j];
+      if (a.min[0] > b.max[0] + eps || a.max[0] < b.min[0] - eps || a.min[1] > b.max[1] + eps || a.max[1] < b.min[1] - eps || a.min[2] > b.max[2] + eps || a.max[2] < b.min[2] - eps) continue;
+      parent[find(j)] = find(i);
+    }
+  }
+  const groups = new Map<number, number[]>();
+  bodies.forEach((_, i) => groups.set(find(i), [...(groups.get(find(i)) ?? []), i]));
+  const out: Body[] = [];
+  for (const members of groups.values()) {
+    const first = bodies[members[0]];
+    if (members.length === 1) {
+      out.push(first);
+      continue;
+    }
+    const solid = unionSolids(members.map((m) => bodies[m].solid));
+    members.forEach((m) => bodies[m].solid.delete());
+    out.push({ ...first, solid });
+  }
+  return out;
+}
+
+function groundBodies(bodies: Body[]) {
+  const floor = (b: Body) => b.solid.boundingBox().min[2];
+  const order = bodies.map((_, i) => i).sort((a, b) => floor(bodies[a]) - floor(bodies[b]));
+  for (const i of order) {
+    const hang = bodies[i];
+    const z0 = floor(hang);
+    if (z0 <= 0.05) continue;
+    const shadow = hang.solid.project();
+    const prism = shadow.extrude(z0);
+    shadow.delete();
+    const box = prism.boundingBox();
+    // Everything of the other bodies that lies under this one. Only what touches the column is tested:
+    // with many loose pieces (every letter of a logo) comparing all against all would take minutes.
+    let column: Manifold | null = null;
+    bodies.forEach((other, j) => {
+      if (j === i) return;
+      const ob = other.solid.boundingBox();
+      if (ob.min[0] > box.max[0] || ob.max[0] < box.min[0] || ob.min[1] > box.max[1] || ob.max[1] < box.min[1] || ob.min[2] > box.max[2]) return;
+      const part = other.solid.intersect(prism);
+      if (part.isEmpty()) return part.delete();
+      const rest = other.solid.subtract(part);
+      other.solid.delete();
+      other.solid = rest;
+      const joined: Manifold = column ? column.add(part) : part;
+      if (column) column.delete();
+      if (joined !== part) part.delete();
+      column = joined;
+    });
+    prism.delete();
+    if (!column) continue;
+    const grown = hang.solid.add(column);
+    hang.solid.delete();
+    (column as Manifold).delete();
+    hang.solid = grown;
+  }
+  // A body that was entirely under a column has nothing left to print.
+  for (let k = bodies.length - 1; k >= 0; k--) {
+    if (!bodies[k].solid.isEmpty()) continue;
+    bodies[k].solid.delete();
+    bodies.splice(k, 1);
+  }
+}
+
 export function buildJob(doc: DesignDoc, bed: Bed, colorMap: ColorMap = {}): BuiltJob {
   const warnings: string[] = [];
   const nodes = doc.nodes.filter((n) => !n.hidden && !n.hole);
@@ -199,7 +281,9 @@ export function buildJob(doc: DesignDoc, bed: Bed, colorMap: ColorMap = {}): Bui
     bodies.push(...list);
   }
 
-  const { slots, entries } = planSlots(bodies, colorMap);
+  const merged = mergeTouching(bodies, planSlots(bodies, colorMap).entries.map((e) => e.slot));
+  groundBodies(merged);
+  const { slots, entries } = planSlots(merged, colorMap);
   const objects: BuiltJob['objects'] = [];
   const boxes: BuiltJob['boxes'] = [];
   const used: number[] = [];

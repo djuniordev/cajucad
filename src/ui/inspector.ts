@@ -187,7 +187,7 @@ export class Inspector {
     if (n.kind === 'mesh' && !this.isSolidMesh(n)) {
       frag.appendChild(el(`<div class="warn">Esta malha não é um sólido fechado (tem buracos ou faces soltas). Ela é exibida, mas não entra em furos, grupos nem na exportação STL.</div>`));
     }
-    if (n.kind === 'mesh' && !isPart(n) && this.isSolidMesh(n)) frag.appendChild(this.paintParts(n));
+    if (n.kind !== 'group' && !n.hole && !isPart(n) && (n.kind !== 'mesh' || this.isSolidMesh(n))) frag.appendChild(this.paintParts(n));
     frag.appendChild(this.actions(n));
     frag.appendChild(this.assembly(n));
     return wrapper;
@@ -200,35 +200,43 @@ export class Inspector {
   private paintParts(n: SceneNode) {
     const s = el(`<div class="section"><div class="section-title">Pintar por partes</div></div>`);
     const sug = suggestCutHeight(n, store.doc.assets);
-    if (!sug) {
-      s.appendChild(el(`<div class="hint" style="margin-top:0">Não achei um relevo nesta peça para separar.</div>`));
-      return s;
-    }
+    if (!sug) return s;
     const sz = n.scale[2] || 1;
-    const cur = this.cutAt.get(n.id) ?? sug.z;
+    const height = sug.top - sug.bottom;
+    const skin = Math.min(1, height / 4);
+    const cur = this.cutAt.get(n.id) ?? sug.z ?? sug.top - skin;
+    const set = (z: number) => {
+      this.cutAt.set(n.id, z);
+      this.render();
+    };
+    const presets = el(`<div class="joint-kinds"></div>`);
+    const relief = el<HTMLButtonElement>(`<button class="btn ${sug.z !== null && Math.abs(cur - sug.z) < 0.005 ? 'active' : ''}" data-tip="Letras, logos e desenhos em relevo">Relevo</button>`);
+    relief.disabled = sug.z === null;
+    relief.onclick = () => set(sug.z!);
+    const top = el<HTMLButtonElement>(`<button class="btn ${Math.abs(cur - (sug.top - skin)) < 0.005 ? 'active' : ''}" data-tip="Só a superfície de cima, com ${String(skin).replace('.', ',')} mm de espessura">Camada de cima</button>`);
+    top.onclick = () => set(sug.top - skin);
+    presets.append(relief, top);
+    s.appendChild(presets);
     s.appendChild(
       this.keyed('cut-z', sliderRow({
         label: 'Altura do corte',
         value: cur * sz,
-        min: 0,
+        min: sug.bottom * sz,
         max: Math.max(sug.top * sz, cur * sz),
         step: 0.1,
         unit: 'mm',
-        onCommit: (v) => {
-          this.cutAt.set(n.id, v / sz);
-          this.render();
-        },
+        onCommit: (v) => set(v / sz),
       })),
     );
-    const b = el<HTMLButtonElement>(`<button class="btn soft" style="width:100%">${icon('split', 16)}<span>Separar o relevo em partes</span></button>`);
+    const b = el<HTMLButtonElement>(`<button class="btn soft" style="width:100%">${icon('split', 16)}<span>Separar em partes</span></button>`);
     b.disabled = !!n.locked;
     b.onclick = () => {
       const count = cmd.splitByHeight(n.id, cur);
       if (!count) return toast('Nada acima dessa altura para separar.', 'error');
-      toast(`${count} partes separadas. Clique em cada uma para pintar; use Agrupar (Ctrl G) para mover tudo junto.`, 'info', 6000);
+      toast(count === 1 ? 'Camada separada. Clique nela para pintar.' : `${count} partes separadas. Clique em cada uma (ou arraste uma caixa) para pintar; Agrupar (Ctrl G) mantém tudo junto ao mover.`, 'info', 6000);
     };
     s.appendChild(b);
-    s.appendChild(el(`<div class="hint">Corta na altura marcada (sugerida pelo degrau da peça): o que sobe vira uma parte para cada letra ou desenho, no mesmo lugar, e cada uma aceita a sua cor.</div>`));
+    s.appendChild(el(`<div class="hint">Corta na altura marcada: a base fica de um lado e o que está acima vira uma parte para cada letra ou desenho (ou uma camada só), no mesmo lugar. Cada uma aceita a sua cor.${n.kind !== 'mesh' ? ' A peça vira uma malha comum (Ctrl Z desfaz).' : ''}</div>`));
     return s;
   }
 

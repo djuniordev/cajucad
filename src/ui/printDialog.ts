@@ -124,17 +124,32 @@ export async function openPrintDialog() {
 
   unsub.push(api.bambu.onProgress((m) => busy && ((busy = m), renderRight())));
   unsub.push(api.printers.onUpload((p) => ((uploadPct = p), renderRight())));
-  const onStatus = () => {
-    // New AMS readout: re-match slots to trays unless the user already picked.
-    // Redrawing a column replaces its elements, which closes an open dropdown and drops the typing focus.
-    const editing = (col: HTMLElement) => col.contains(document.activeElement) && /^(SELECT|INPUT|TEXTAREA)$/.test(document.activeElement!.tagName);
-    if (!editing(left)) renderLeft();
-    if (!editing(right)) renderRight();
+  // Redrawing a column replaces its elements, which closes an open dropdown and drops the typing focus.
+  const editing = (col: HTMLElement) => col.contains(document.activeElement) && /^(SELECT|INPUT|TEXTAREA)$/.test(document.activeElement!.tagName);
+  let redrawLater = false;
+  const redraw = () => {
+    const l = editing(left);
+    const r = editing(right);
+    if (!l) renderLeft();
+    if (!r) renderRight();
+    redrawLater = l || r;
   };
+  // What was held back is drawn as soon as the field loses focus.
+  modal.addEventListener('focusout', () => {
+    if (!redrawLater) return;
+    setTimeout(() => {
+      if (!back.isConnected || editing(left) || editing(right)) return;
+      redrawLater = false;
+      renderLeft();
+      renderRight();
+    }, 0);
+  });
+  // New AMS readout: re-match slots to trays unless the user already picked.
+  const onStatus = () => redraw();
   statusListeners.add(onStatus);
   unsub.push(() => statusListeners.delete(onStatus));
-  unsub.push(filaments.on(() => (invalidate(), renderLeft(), renderRight())));
-  unsub.push(store.onDoc(() => (invalidate(), renderLeft(), renderRight())));
+  unsub.push(filaments.on(() => (invalidate(), redraw())));
+  unsub.push(store.onDoc(() => (invalidate(), redraw())));
 
   function invalidate() {
     if (result) resultStale = true;
