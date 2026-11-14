@@ -3,6 +3,8 @@ const { app, dialog, safeStorage, BrowserWindow } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const slicer = require('./slicer.cjs');
+const gcode = require('./gcode.cjs');
+const { unzipSync, strFromU8 } = require('fflate');
 const printer = require('./printer.cjs');
 
 const storeFile = () => path.join(app.getPath('userData'), 'printers.json');
@@ -57,6 +59,15 @@ function register(ipcMain) {
     for (const k of [...jobs.keys()].slice(0, -6)) jobs.delete(k);
     const { dir, file, ...rest } = r;
     return { id, ...rest };
+  });
+
+  /** Toolpaths of a sliced job, for the layer preview. */
+  ipcMain.handle('bambu:toolpaths', (_e, jobId, bed) => {
+    const j = jobs.get(jobId);
+    if (!j?.sliced) throw new Error('Fatie o projeto para ver as camadas.');
+    const g = unzipSync(new Uint8Array(fs.readFileSync(j.file)))['Metadata/plate_1.gcode'];
+    if (!g) throw new Error('O projeto não tem G-code. Fatie de novo.');
+    return gcode.parse(strFromU8(g), bed && { width: Number(bed.width), depth: Number(bed.depth) });
   });
 
   ipcMain.handle('bambu:saveProject', async (_e, { jobId, name, kind }) => {

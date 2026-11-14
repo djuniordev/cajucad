@@ -5,7 +5,7 @@ const { app } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
-const { unzipSync, strFromU8 } = require('fflate');
+const { unzipSync, zipSync, strFromU8, strToU8 } = require('fflate');
 const presets = require('./bambu-presets.cjs');
 
 const BED_TYPES = ['Cool Plate', 'Engineering Plate', 'High Temp Plate', 'Textured PEI Plate', 'Supertack Plate'];
@@ -69,6 +69,26 @@ function run(exe, args, { timeoutMs, onLine }) {
 }
 
 const num = (v) => (v === undefined || v === '' ? undefined : Number(v));
+
+/**
+ * Makes every object print its own supports with its own filament. With the default ("use
+ * whichever is loaded") the slicer mixes them: a yellow piece got white supports and the other
+ * way round. The object's filament is in its `extruder` entry; support follows it.
+ */
+function supportsPerObject(buf) {
+  const z = unzipSync(new Uint8Array(buf));
+  const name = 'Metadata/model_settings.config';
+  if (!z[name]) return buf;
+  const cfg = strFromU8(z[name]).replace(/<object id="\d+">[\s\S]*?<\/object>/g, (block) => {
+    const ex = /<metadata key="extruder" value="(\d+)"\/>/.exec(block)?.[1];
+    if (!ex) return block;
+    return block.replace(/(<metadata key="extruder" value="\d+"\/>)/, `$1
+    <metadata key="support_filament" value="${ex}"/>
+    <metadata key="support_interface_filament" value="${ex}"/>`);
+  });
+  z[name] = strToU8(cfg);
+  return Buffer.from(zipSync(z));
+}
 
 /** Read the interesting parts of a sliced project (.gcode.3mf). */
 function readResult(file) {
@@ -135,32 +155,48 @@ async function slice(job, onProgress = () => {}) {
     processOverrides: processOverrides(job.overrides),
   });
 
-  const args = [
-    ...(job.slice ? ['--slice', '0'] : []),
+  const common = [
     '--arrange', '0',
     '--load-settings', `${flat.machine};${flat.process}`,
     '--load-filaments', flat.filaments.join(';'),
-    '--load-filament-ids', job.objects.map((o) => o.filament + 1).join(','),
-    '--outputdir', dir,
-    '--export-3mf', 'project.gcode.3mf',
-    ...files,
   ];
-
-  onProgress(job.slice ? 'Fatiando com o Bambu Studio…' : 'Montando o projeto…');
-  const r = await run(exe, args, { timeoutMs: 10 * 60 * 1000 });
+  const ids = ['--load-filament-ids', job.objects.map((o) => o.filament + 1).join(',')];
   const resultPath = path.join(dir, 'result.json');
-  let result = null;
-  try {
-    result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
-  } catch {
-    /* no result.json: the process died before writing it */
-  }
   const file = path.join(dir, 'project.gcode.3mf');
-  if (r.code !== 0 || !fs.existsSync(file)) {
-    const msg = result?.error_string && result.error_string !== 'Success.' ? result.error_string : `O Bambu Studio fechou com erro (código ${r.code}).`;
-    throw new Error(msg);
+  const timeoutMs = 10 * 60 * 1000;
+
+  /** Throws the slicer's own message when a run did not produce `out`. */
+  const check = (r, out) => {
+    let result = null;
+    try {
+      result = JSON.parse(fs.readFileSync(resultPath, 'utf8'));
+    } catch {
+      /* no result.json: the process died before writing it */
+    }
+    if (r.code !== 0 || !fs.existsSync(out)) {
+      const msg = result?.error_string && result.error_string !== 'Success.' ? result.error_string : `O Bambu Studio fechou com erro (código ${r.code}).`;
+      throw new Error(msg);
+    }
+    if (result && result.return_code && result.error_string !== 'Success.') throw new Error(result.error_string);
+  };
+
+  // Supports with several filaments: assemble the project first, tell each object to print its
+  // own supports, then slice that project.
+  const perObject = job.overrides?.supports === true && new Set(job.objects.map((o) => o.filament)).size > 1;
+  onProgress(job.slice ? 'Fatiando com o Bambu Studio…' : 'Montando o projeto…');
+  if (perObject) {
+    const base = path.join(dir, 'base.3mf');
+    check(await run(exe, [...common, ...ids, '--outputdir', dir, '--export-3mf', 'base.3mf', ...files], { timeoutMs }), base);
+    const patched = path.join(dir, 'patched.3mf');
+    fs.writeFileSync(patched, supportsPerObject(fs.readFileSync(base)));
+    // No --load-settings here: the project already carries them, and loading them again makes
+    // the slicer drop the prime tower.
+    if (job.slice) check(await run(exe, ['--slice', '0', '--arrange', '0', '--outputdir', dir, '--export-3mf', 'project.gcode.3mf', patched], { timeoutMs }), file);
+    else fs.copyFileSync(patched, file);
+  } else {
+    const args = [...(job.slice ? ['--slice', '0'] : []), ...common, ...ids, '--outputdir', dir, '--export-3mf', 'project.gcode.3mf', ...files];
+    check(await run(exe, args, { timeoutMs }), file);
   }
-  if (result && result.return_code && result.error_string !== 'Success.') throw new Error(result.error_string);
 
   return { dir, file, size: fs.statSync(file).size, ...readResult(file) };
 }

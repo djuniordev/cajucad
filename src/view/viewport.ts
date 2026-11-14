@@ -4,8 +4,9 @@ import { TransformControls } from 'three/examples/jsm/controls/TransformControls
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
 import { CSS2DRenderer, CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import { store } from '../core/store';
-import { colorSig, decompose, nodeMatrix, rawAssetGeometry, renderGeometry, renderPieces, shapeKey, worldBounds } from '../core/geometry';
+import { colorSig, decompose, localBox, nodeMatrix, rawAssetGeometry, renderGeometry, renderPieces, shapeKey, worldBounds } from '../core/geometry';
 import { ResizeHandles } from './handles';
+import { TurnWheel } from './wheel';
 import type { SceneNode, Vec3 } from '../core/types';
 import { explodeOffsets, onExplode, type SurfaceHit } from '../core/assembly';
 import { settings } from '../core/settings';
@@ -54,6 +55,8 @@ export class Viewport {
   private edgeCache = new WeakMap<THREE.BufferGeometry, THREE.EdgesGeometry>();
   private holeMat: THREE.MeshStandardMaterial;
   private handles: ResizeHandles;
+  private wheel: TurnWheel;
+  private mode: GizmoMode = 'translate';
   /** Rubber-band rectangle drawn while selecting with the left button. */
   private marquee: HTMLElement;
   /** Object being dragged along the workplane with the left button. */
@@ -161,7 +164,18 @@ export class Viewport {
       dom: this.renderer.domElement,
       orbit: this.orbit,
       preview: (id, t) => this.previewTransform(id, t),
+      previewMatrix: (ms, box) => this.previewMatrix(ms, box),
       gizmoBusy: () => !!this.dragStart || !!this.moveDrag,
+      setGizmoVisible: (v) => (this.gizmo.getHelper().visible = v),
+    });
+    this.wheel = new TurnWheel({
+      scene: this.scene,
+      camera: this.camera,
+      dom: this.renderer.domElement,
+      orbit: this.orbit,
+      previewMatrix: (ms, box) => this.previewMatrix(ms, box),
+      busy: () => !!this.dragStart || !!this.moveDrag || this.handles.active,
+      restore: () => this.sync(),
       setGizmoVisible: (v) => (this.gizmo.getHelper().visible = v),
     });
 
@@ -193,6 +207,7 @@ export class Viewport {
     }
     this.orbit.update();
     this.handles.update();
+    this.wheel.update();
     this.renderer.render(this.scene, this.camera);
     this.labels.render(this.scene, this.camera);
   }
@@ -212,8 +227,9 @@ export class Viewport {
     u.uMinor.value.set(css('--grid-minor'));
     u.uMajor.value.set(css('--grid-major'));
     u.uAccent.value.set(css('--accent'));
-    (this.selBox.material as THREE.LineDashedMaterial).color.set(css('--accent'));
-    this.handles?.setAccent(css('--accent'));
+    (this.selBox.material as THREE.LineDashedMaterial).color.set(css('--select'));
+    this.handles?.setAccent(css('--select'));
+    this.wheel?.setColor(css('--select'));
     for (const id of this.views.keys()) this.styleView(id);
   }
 
@@ -225,7 +241,9 @@ export class Viewport {
   }
 
   setMode(mode: GizmoMode) {
+    this.mode = mode;
     this.gizmo.setMode(mode);
+    this.updateSelection();
   }
 
   // ---------- scene sync ----------
@@ -346,7 +364,7 @@ export class Viewport {
       if (n.hole) {
         part.mesh.material = this.holeMat;
         part.mesh.castShadow = false;
-        edgeMat.color.set(selected ? css('--accent') : css('--hole-edge'));
+        edgeMat.color.set(selected ? css('--select') : css('--hole-edge'));
         edgeMat.opacity = selected ? 1 : 0.85;
       } else {
         if (!(part.mesh.material instanceof THREE.MeshPhysicalMaterial)) {
@@ -358,7 +376,7 @@ export class Viewport {
         mat.color.set(color);
         mat.emissive.set(hovered && !selected ? 0x222233 : 0x000000);
         part.mesh.castShadow = true;
-        edgeMat.color.set(selected ? css('--accent') : new THREE.Color(color).multiplyScalar(0.55).getStyle());
+        edgeMat.color.set(selected ? css('--select') : new THREE.Color(color).multiplyScalar(0.55).getStyle());
         edgeMat.opacity = selected ? 1 : 0.55;
       }
     }
@@ -384,6 +402,9 @@ export class Viewport {
     this.handles.sync();
     const sel = store.selected.filter((n) => !n.hidden);
     const box = this.selectionBounds(sel);
+    const turnable = sel.filter((n) => !n.locked);
+    if (box && turnable.length && this.mode !== 'rotate' && !this.dragStart) this.wheel.show(box, turnable);
+    else this.wheel.hide();
     if (!box) {
       this.gizmo.detach();
       this.selBox.visible = false;
@@ -395,8 +416,12 @@ export class Viewport {
       const c = box.getCenter(new THREE.Vector3());
       if (sel.length === 1) {
         // Single object: gizmo follows the object's own frame.
+        // The gizmo sits at the base centre of what is actually visible (after cuts and holes),
+        // not at the object's origin, so it never drifts away from the part.
         const n = sel[0];
-        this.pivot.position.set(...n.position);
+        const lb = localBox(n, store.doc.assets);
+        const origin = lb ? new THREE.Vector3((lb.min.x + lb.max.x) / 2, (lb.min.y + lb.max.y) / 2, lb.min.z).applyMatrix4(nodeMatrix(n)) : new THREE.Vector3(...n.position);
+        this.pivot.position.copy(origin);
         this.pivot.rotation.set(...(n.rotation.map(THREE.MathUtils.degToRad) as Vec3), 'XYZ');
         this.pivot.scale.set(...n.scale);
       } else {
@@ -456,6 +481,22 @@ export class Viewport {
     if (box) this.drawSelectionBox(box);
   }
 
+  /** Show new matrices for several nodes at once (turning wheel, resizing a selection). */
+  private previewMatrix(ms: Map<string, THREE.Matrix4>, box: THREE.Box3 | null) {
+    for (const [id, m] of ms) {
+      const v = this.views.get(id);
+      if (!v) continue;
+      v.root.matrix.copy(m);
+      v.root.matrixWorldNeedsUpdate = true;
+    }
+    this.gizmo.detach();
+    if (box) this.drawSelectionBox(box);
+    else {
+      this.selBox.visible = false;
+      this.dimLabels.forEach((l) => (l.visible = false));
+    }
+  }
+
   /** Turn an on-screen size label into an input. */
   private editDimension(axis: 0 | 1 | 2) {
     const pill = this.dimLabels[axis].element;
@@ -487,6 +528,7 @@ export class Viewport {
   }
 
   private beginDrag() {
+    this.wheel.hide();
     const nodes = new Map<string, THREE.Matrix4>();
     for (const n of store.selected) if (!n.locked) nodes.set(n.id, nodeMatrix(n));
     this.pivot.updateMatrixWorld(true);
@@ -563,7 +605,7 @@ export class Viewport {
         done(this.pickSurface(e.clientX, e.clientY));
         return;
       }
-      if (e.button !== 0 || gizmoActive() || this.handles.active) return;
+      if (e.button !== 0 || gizmoActive() || this.handles.active || this.wheel.active) return;
       const additive = e.shiftKey || e.ctrlKey || e.metaKey;
       this.raycaster.setFromCamera(this.ndc(e.clientX, e.clientY), this.camera);
       const meshes = [...this.views.values()].filter((v) => v.root.visible).flatMap((v) => v.parts.map((p) => p.mesh));
@@ -663,6 +705,7 @@ export class Viewport {
     };
     this.gizmo.detach();
     this.handles.hide();
+    this.wheel.hide();
     this.selBox.visible = false;
     this.dimLabels.forEach((l) => (l.visible = false));
     return true;

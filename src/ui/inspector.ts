@@ -427,8 +427,31 @@ export class Inspector {
     });
     s.appendChild(g);
     s.appendChild(el(`<div class="grid3 dim-captions"><span>Largura</span><span>Profundidade</span><span>Altura</span></div>`));
-    s.appendChild(el(`<div class="hint">Dica: arraste as alças brancas no objeto ou clique nas medidas na tela. <kbd>Shift</kbd> mantém a proporção.</div>`));
+    s.appendChild(this.percentRow());
+    s.appendChild(el(`<div class="hint">Dica: arraste as alças pequenas no objeto ou clique nas medidas na tela. <kbd>Shift</kbd> mantém a proporção.</div>`));
     return s;
+  }
+
+  /** Make everything selected bigger or smaller by a percentage of its current size. */
+  private percentRow() {
+    const row = el(`<div class="row pct-row"><span class="pct-label">Tamanho em %</span></div>`);
+    const f = this.keyed('pct', numberField({
+      label: '%',
+      value: 100,
+      min: 1,
+      max: 10000,
+      step: 5,
+      digits: 1,
+      onCommit: (v) => cmd.scaleSelection(v / 100),
+    }));
+    f.classList.add('pct-field');
+    row.appendChild(f);
+    for (const [label, k] of [['−10%', 0.9], ['+10%', 1.1]] as const) {
+      const b = el<HTMLButtonElement>(`<button class="btn soft" style="height:30px;padding:0 8px">${label}</button>`);
+      b.onclick = () => cmd.scaleSelection(k);
+      row.appendChild(b);
+    }
+    return row;
   }
 
   private transform(n: SceneNode) {
@@ -486,6 +509,28 @@ export class Inspector {
     const body = el(`<div class="insp-scroll"></div>`);
     wrapper.appendChild(body);
     body.appendChild(this.typeAndColor(nodes));
+
+    // Size of the whole selection: everything scales together, keeping proportions.
+    const size = cmd.selectionSize();
+    if (size) {
+      const sz = el(`<div class="section"><div class="section-title">Medidas da seleção</div></div>`);
+      const g3 = el(`<div class="grid3"></div>`);
+      (['L', 'P', 'A'] as const).forEach((label, i) =>
+        g3.appendChild(this.keyed(`sel-${AXES[i]}`, numberField({
+          label,
+          axis: AXES[i],
+          value: size[i],
+          min: 0.01,
+          step: 1,
+          onCommit: (v) => size[i] > 0 && cmd.scaleSelection(v / size[i]),
+        }))),
+      );
+      sz.appendChild(g3);
+      sz.appendChild(el(`<div class="grid3 dim-captions"><span>Largura</span><span>Profundidade</span><span>Altura</span></div>`));
+      sz.appendChild(this.percentRow());
+      sz.appendChild(el(`<div class="hint">Todas as peças mudam juntas, mantendo a proporção entre elas.</div>`));
+      body.appendChild(sz);
+    }
 
     const s = el(`<div class="section"></div>`);
     const g = el<HTMLButtonElement>(`<button class="btn primary" style="width:100%;height:40px">${icon('group', 17)} Agrupar <span class="kbd" style="color:rgba(255,255,255,.75)">Ctrl G</span></button>`);

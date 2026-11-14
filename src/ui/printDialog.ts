@@ -3,6 +3,7 @@ import { store } from '../core/store';
 import { FILAMENT_TYPES, filaments } from '../core/filaments';
 import { autoMapTrays, buildJob, colorLeaves, effectiveSlots, fmtDuration, planSlots, presetFor, type ColorMap, type Tray } from '../core/print';
 import { el, esc, toast } from './dom';
+import { createMiniPreview, loadToolpaths } from './slicePreview';
 import { icon } from './icons';
 
 /**
@@ -78,11 +79,13 @@ export async function openPrintDialog() {
   const unsub: (() => void)[] = [];
   const close = () => {
     unsub.forEach((u) => u());
+    mini?.dispose();
+    mini = null;
     back.remove();
     removeEventListener('keydown', onKey, true);
   };
   const onKey = (e: KeyboardEvent) => {
-    if (e.key === 'Escape' && !(e.target as HTMLElement).matches('input, select')) {
+    if (e.key === 'Escape' && !document.querySelector('.slice-preview') && !(e.target as HTMLElement).matches('input, select')) {
       e.stopPropagation();
       close();
     }
@@ -101,6 +104,8 @@ export async function openPrintDialog() {
   /** Until the user picks a tray by hand, keep matching colours to the AMS as it reports. */
   let autoPick = true;
   let result: SliceResult | null = null;
+  /** Layer view of the sliced result (kept across redraws of the right column). */
+  let mini: { el: HTMLElement; dispose(): void } | null = null;
   let busy: string | null = null;
   let resultStale = false;
   let uploadPct: number | null = null;
@@ -305,7 +310,7 @@ export async function openPrintDialog() {
             : r
               ? `${resultStale ? `<div class="hint warn-t">${icon('warning', 14)} Você mudou algo depois de fatiar. Fatie de novo.</div>` : ''}
                 <div class="result-grid">
-                  ${r.thumbnail ? `<img class="plate" src="${r.thumbnail}" alt="Prévia da mesa"/>` : ''}
+                  ${mini ? '' : r.thumbnail ? `<img class="plate" src="${r.thumbnail}" alt="Prévia da mesa"/>` : ''}
                   <div class="stats">
                     <div class="stat"><span>Tempo</span><b>${fmtDuration(r.seconds)}</b></div>
                     <div class="stat"><span>Filamento</span><b>${r.weightG !== undefined ? `${r.weightG.toFixed(0)} g` : '—'}</b></div>
@@ -314,6 +319,7 @@ export async function openPrintDialog() {
                       .join('')}
                   </div>
                 </div>
+                ${mini ? '<div class="mini-slot"></div>' : ''}
                 ${r.outsideBed ? `<div class="hint warn-t">${icon('warning', 14)} O Bambu Studio avisou que algo ficou fora da mesa.</div>` : ''}
                 <div class="row-btns">
                   <button class="btn soft" data-act="save-project" data-tip="Abra no Bambu Studio para conferir ou imprimir de lá">${icon('save', 16)} Projeto .3mf</button>
@@ -328,6 +334,8 @@ export async function openPrintDialog() {
       </section>
 
       ${printerCard()}`;
+    // The 3D preview lives outside the redraw (it would lose its view every second otherwise).
+    if (mini) right.querySelector('.mini-slot')?.appendChild(mini.el);
   }
 
   function printerCard() {
@@ -538,6 +546,11 @@ export async function openPrintDialog() {
     if (slice) {
       result = r;
       resultStale = false;
+      mini?.dispose();
+      mini = null;
+      // Show the sliced result right away, supports included.
+      const tp = await loadToolpaths(r.id, pinfo!.bed);
+      if (tp && result === r) mini = createMiniPreview(tp, r, pinfo!.bed);
     }
     renderRight();
     return r;

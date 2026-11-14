@@ -302,6 +302,33 @@ export function setLocalSize(id: string, axis: 0 | 1 | 2, mm: number, uniform = 
   updateNodes([id], (x) => Object.assign(x, resizedTransform(x, k, fixed)));
 }
 
+/** Size (mm) of the box around everything selected, in world axes. */
+export function selectionSize(): Vec3 | null {
+  const sel = store.selected.filter((n) => !n.hidden);
+  if (!sel.length) return null;
+  const b = boundsOf(sel);
+  if (b.isEmpty()) return null;
+  const s = b.getSize(new THREE.Vector3());
+  return [s.x, s.y, s.z];
+}
+
+/**
+ * Scales everything selected by `f` (1 = same, 0.5 = half, 2 = double), all together, keeping the
+ * centre of the base of the whole selection where it is. Objects keep their relative positions.
+ */
+export function scaleSelection(f: number) {
+  const sel = store.selected.filter((n) => !n.locked && !n.hidden);
+  if (!sel.length || !(f > 0) || Math.abs(f - 1) < 1e-9) return;
+  const box = boundsOf(sel);
+  if (box.isEmpty()) return;
+  const c = box.getCenter(new THREE.Vector3());
+  const S = new THREE.Matrix4()
+    .makeTranslation(c.x, c.y, box.min.z)
+    .multiply(new THREE.Matrix4().makeScale(f, f, f))
+    .multiply(new THREE.Matrix4().makeTranslation(-c.x, -c.y, -box.min.z));
+  updateNodes(sel.map((n) => n.id), (n) => Object.assign(n, decompose(S.clone().multiply(nodeMatrix(n)))));
+}
+
 /** Local axis of a node that best matches a world axis (for on-screen sizes). */
 export function localAxisFor(n: SceneNode, worldAxis: 0 | 1 | 2): 0 | 1 | 2 {
   const R = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(...(n.rotation.map(THREE.MathUtils.degToRad) as Vec3), 'XYZ'));

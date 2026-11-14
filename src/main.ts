@@ -146,7 +146,10 @@ const fileInput = el<HTMLInputElement>(`<input type="file" hidden multiple accep
 const projectInput = el<HTMLInputElement>(`<input type="file" hidden accept=".json,.ocad.json" />`);
 const inspector = new Inspector();
 
-app.append(stage, topbar, library, inspector.root, viewbar, snapbar, fileDrop, fileInput, projectInput);
+// Thin strip above the top bar: in the desktop app it drags the window (the bar itself already does).
+const dragStrip = el(`<div class="window-drag"></div>`);
+
+app.append(stage, dragStrip, topbar, library, inspector.root, viewbar, snapbar, fileDrop, fileInput, projectInput);
 
 const $ = <T extends HTMLElement = HTMLElement>(sel: string, root: ParentNode = document) => root.querySelector<T>(sel)!;
 
@@ -177,7 +180,13 @@ async function boot() {
   };
   viewport.onDimensionEdit = (axis, mm) => {
     const sel = store.selected;
-    if (sel.length !== 1) return toast('Selecione um objeto só para digitar a medida.');
+    if (sel.length > 1) {
+      // Several objects: scale them together, keeping proportions.
+      const size = cmd.selectionSize();
+      if (size && size[axis] > 0) cmd.scaleSelection(mm / size[axis]);
+      return;
+    }
+    if (sel.length !== 1) return;
     const n = sel[0];
     const a = cmd.localAxisFor(n, axis);
     const local = cmd.localSize(n);

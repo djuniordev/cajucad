@@ -27,6 +27,20 @@ export interface SliceJob {
   overrides: { infill?: string; supports?: boolean; bedType?: string; tower?: { x: number; y: number } | null };
 }
 
+export interface Toolpaths {
+  count: number;
+  /** x0 y0 z0 x1 y1 z1 per segment, in bed coordinates (mm). */
+  pos: Float32Array;
+  /** Index into `types` per segment. */
+  type: Uint8Array;
+  /** Filament (0-based) per segment. */
+  tool: Uint8Array;
+  layer: Uint16Array;
+  /** Names of the line types found ("Outer wall", "Support"...). */
+  types: string[];
+  layerZ: number[];
+}
+
 export interface SliceResult {
   id: string;
   size: number;
@@ -107,6 +121,8 @@ export interface DesktopApi {
     printerInfo(name: string): Promise<BambuPrinterInfo>;
     slice(job: SliceJob): Promise<SliceResult>;
     saveProject(args: { jobId: string; name: string; kind: 'project' | 'gcode' }): Promise<string | null>;
+    /** Extruded segments of a sliced job in print order (x0 y0 z0 x1 y1 z1 each). */
+    toolpaths(jobId: string, bed?: { width: number; depth: number }): Promise<Toolpaths>;
     onProgress(fn: (msg: string) => void): () => void;
   };
   printers: {

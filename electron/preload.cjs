@@ -26,6 +26,7 @@ contextBridge.exposeInMainWorld('opencad', {
     printerInfo: (name) => ipcRenderer.invoke('bambu:printerInfo', name),
     slice: (job) => ipcRenderer.invoke('bambu:slice', job),
     saveProject: (args) => ipcRenderer.invoke('bambu:saveProject', args),
+    toolpaths: (jobId, bed) => ipcRenderer.invoke('bambu:toolpaths', jobId, bed),
     onProgress: (fn) => on('bambu:progress', fn),
   },
 
