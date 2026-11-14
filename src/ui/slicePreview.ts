@@ -80,6 +80,7 @@ class SliceView {
     this.camera.position.copy(mid).add(new THREE.Vector3(0.5, -0.85, 0.62).normalize().multiplyScalar(radius * 2.6));
     this.orbit = new OrbitControls(this.camera, this.renderer.domElement);
     this.orbit.target.copy(mid);
+    this.orbit.update(); // aim the camera at the target right away
     this.orbit.screenSpacePanning = true;
     this.orbit.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.PAN };
     this.orbit.addEventListener('change', () => this.invalidate());

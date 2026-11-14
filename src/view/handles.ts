@@ -166,7 +166,7 @@ export class ResizeHandles {
   }
 
   private screenScale(p: THREE.Vector3) {
-    return Math.max(0.35, p.distanceTo(this.host.camera.position) * 0.0068);
+    return Math.max(0.15, p.distanceTo(this.host.camera.position) * 0.0032);
   }
 
   private rotationOf(n: Pick<SceneNode, 'rotation'>) {
@@ -185,8 +185,21 @@ export class ResizeHandles {
 
   private hit(e: PointerEvent): THREE.Mesh | null {
     if (!this.group.visible) return null;
-    this.ray(e);
-    return (this.raycaster.intersectObjects(this.meshes, false)[0]?.object as THREE.Mesh) ?? null;
+    // Pick by distance on screen, so the small dots are easy to grab.
+    const r = this.host.dom.getBoundingClientRect();
+    const v = new THREE.Vector3();
+    let best: THREE.Mesh | null = null;
+    let bestD = 14;
+    for (const m of this.meshes) {
+      m.getWorldPosition(v).project(this.host.camera);
+      if (v.z > 1) continue;
+      const d = Math.hypot(((v.x + 1) / 2) * r.width + r.left - e.clientX, ((1 - v.y) / 2) * r.height + r.top - e.clientY);
+      if (d < bestD) {
+        bestD = d;
+        best = m;
+      }
+    }
+    return best;
   }
 
   private onDown(e: PointerEvent) {
