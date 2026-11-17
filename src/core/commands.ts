@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { store, uid, clone } from './store';
-import { splitAtHeight, decompose, localBox, nodeMatrix, renderGeometry, resizedTransform, worldBounds } from './geometry';
+import { splitAtHeight, decompose, localBox, nodeMatrix, resizedTransform, worldBounds } from './geometry';
 import { createNode } from './shapes';
 import { filaments } from './filaments';
 import { DEFAULT_FONT_ID, loadFont, textToPolygons } from './fonts';
@@ -280,9 +280,9 @@ export function nudge(delta: Vec3) {
 
 /** Size of the node's own geometry along its local axes (mm, scale included). */
 export function localSize(n: SceneNode): Vec3 | null {
-  const g = renderGeometry(n, store.doc.assets);
-  if (!g?.boundingBox) return null;
-  const s = g.boundingBox.getSize(new THREE.Vector3());
+  const box = localBox(n, store.doc.assets);
+  if (!box) return null;
+  const s = box.getSize(new THREE.Vector3());
   return [s.x * Math.abs(n.scale[0]), s.y * Math.abs(n.scale[1]), s.z * Math.abs(n.scale[2])];
 }
 

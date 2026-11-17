@@ -53,6 +53,14 @@ function importGeometry(src: THREE.BufferGeometry, name: string): ImportResult {
   g.setAttribute('position', src.getAttribute('position'));
   const merged = mergeVertices(g, 1e-5);
   merged.computeBoundingBox();
+  // Models in metres or other big units arrive tiny (under 5 mm): bring them to a printable 100 mm.
+  const longest = Math.max(...merged.boundingBox!.getSize(new THREE.Vector3()).toArray());
+  const tiny = longest > 0 && longest < 5;
+  if (tiny) {
+    const f = 100 / longest;
+    merged.scale(f, f, f);
+    merged.computeBoundingBox();
+  }
   const bb = merged.boundingBox!;
   const center = bb.getCenter(new THREE.Vector3());
   // Origin at bottom-centre so the object rests on the workplane.
@@ -63,9 +71,11 @@ function importGeometry(src: THREE.BufferGeometry, name: string): ImportResult {
   const id = uid();
   const node = createNode('mesh', { name, params: { asset: id }, color: nextColor() });
   const solid = manifoldFromAsset(asset);
-  const warning = solid
-    ? undefined
-    : 'A malha não é um sólido fechado: ela aparece na cena, mas não participa de furos e grupos.';
+  const notes = [
+    tiny ? `A peça era minúscula (${longest.toPrecision(2)} mm): ampliei para 100 mm no maior lado. Ajuste em “Tamanho em %”.` : '',
+    solid ? '' : 'A malha não é um sólido fechado: ela aparece na cena, mas não participa de furos e grupos.',
+  ].filter(Boolean);
+  const warning = notes.length ? notes.join(' ') : undefined;
   return { nodes: [node], assets: { [id]: asset }, warning };
 }
 

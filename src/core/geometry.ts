@@ -487,7 +487,10 @@ export function rawAssetGeometry(asset: MeshAsset) {
 /** Axis-aligned bounds of a node in world space (uses the exact solid). */
 export function worldBounds(n: SceneNode, assets: DesignDoc['assets']): THREE.Box3 | null {
   const g = renderGeometry(n, assets);
-  if (!g) return null;
+  if (!g) {
+    const raw = rawBox(n, assets);
+    return raw ? raw.clone().applyMatrix4(nodeMatrix(n)) : null;
+  }
   // Exact bounds: transform every vertex (a rotated local box would be loose).
   const m = nodeMatrix(n);
   const pos = g.getAttribute('position');
@@ -529,9 +532,26 @@ export function decompose(m: THREE.Matrix4): Pick<SceneNode, 'position' | 'rotat
 }
 
 /** Geometry bounds of a node in its own local space (before its scale). */
+const rawBoxes = new WeakMap<object, THREE.Box3>();
+
+/** Box of an imported mesh that is not a closed solid (no Manifold for it), so it can still be selected and resized. */
+function rawBox(n: SceneNode, assets: DesignDoc['assets']): THREE.Box3 | null {
+  if (n.kind !== 'mesh') return null;
+  const asset = assets[String(n.params.asset)];
+  if (!asset) return null;
+  let box = rawBoxes.get(asset);
+  if (!box) {
+    box = new THREE.Box3();
+    const p = asset.positions;
+    for (let i = 0; i < p.length; i += 3) box.expandByPoint(new THREE.Vector3(p[i], p[i + 1], p[i + 2]));
+    rawBoxes.set(asset, box);
+  }
+  return box;
+}
+
 export function localBox(n: SceneNode, assets: DesignDoc['assets']): THREE.Box3 | null {
   const g = renderGeometry(n, assets);
-  if (!g) return null;
+  if (!g) return rawBox(n, assets);
   if (!g.boundingBox) g.computeBoundingBox();
   return g.boundingBox!;
 }
