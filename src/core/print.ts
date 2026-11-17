@@ -246,7 +246,9 @@ function groundBodies(bodies: Body[]) {
       if (ob.min[0] > box.max[0] || ob.max[0] < box.min[0] || ob.min[1] > box.max[1] || ob.max[1] < box.min[1] || ob.min[2] > box.max[2]) return;
       const part = other.solid.intersect(prism);
       if (part.isEmpty()) return part.delete();
-      const rest = other.solid.subtract(part);
+      // Subtract the prism, not `part`: the result is the same, but Manifold aborts on some of the
+      // second kind of cut (coincident faces left by the previous columns).
+      const rest = other.solid.subtract(prism);
       other.solid.delete();
       other.solid = rest;
       const joined: Manifold = column ? column.add(part) : part;
