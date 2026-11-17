@@ -424,15 +424,20 @@ export function piecesOf(n: SceneNode, assets: DesignDoc['assets']): Piece[] {
 
   // Later items win over earlier ones where they overlap.
   const original = items.map((it) => it.solid);
+  const boxes = original.map((o) => o.boundingBox());
+  const keys = items.map((it) => `${it.color.toLowerCase()}|${it.filament ?? ''}`);
   const cut: { color: string; filament?: string; solid: Manifold }[] = [];
   items.forEach((it, i) => {
     let s = it.solid;
     const sBox = s.boundingBox();
-    for (let j = i + 1; j < original.length; j++) {
-      if (!boxesOverlap(sBox, original[j].boundingBox())) continue;
-      const next = s.subtract(original[j]);
-      if (s !== it.solid) s.delete();
-      s = next;
+    // Cut every overlapping later item at once: one batched union is far cheaper than many subtractions.
+    const over: Manifold[] = [];
+    // Items of the same colour are united afterwards anyway, so only other colours need cutting.
+    for (let j = i + 1; j < original.length; j++) if (keys[j] !== keys[i] && boxesOverlap(sBox, boxes[j])) over.push(original[j]);
+    if (over.length) {
+      const top = over.length === 1 ? over[0] : M.union(over);
+      s = s.subtract(top);
+      if (top !== over[0]) top.delete();
     }
     if (holeUnion && holeBox && boxesOverlap(sBox, holeBox)) {
       const next = s.subtract(holeUnion);
@@ -486,17 +491,19 @@ export function rawAssetGeometry(asset: MeshAsset) {
 
 /** Axis-aligned bounds of a node in world space (uses the exact solid). */
 export function worldBounds(n: SceneNode, assets: DesignDoc['assets']): THREE.Box3 | null {
-  const g = renderGeometry(n, assets);
-  if (!g) {
+  const gs = boundGeometries(n, assets);
+  if (!gs.length) {
     const raw = rawBox(n, assets);
     return raw ? raw.clone().applyMatrix4(nodeMatrix(n)) : null;
   }
   // Exact bounds: transform every vertex (a rotated local box would be loose).
   const m = nodeMatrix(n);
-  const pos = g.getAttribute('position');
   const box = new THREE.Box3();
   const v = new THREE.Vector3();
-  for (let i = 0; i < pos.count; i++) box.expandByPoint(v.fromBufferAttribute(pos, i).applyMatrix4(m));
+  for (const g of gs) {
+    const pos = g.getAttribute('position');
+    for (let i = 0; i < pos.count; i++) box.expandByPoint(v.fromBufferAttribute(pos, i).applyMatrix4(m));
+  }
   return box;
 }
 
@@ -590,11 +597,28 @@ function rawBox(n: SceneNode, assets: DesignDoc['assets']): THREE.Box3 | null {
   return box;
 }
 
-export function localBox(n: SceneNode, assets: DesignDoc['assets']): THREE.Box3 | null {
+/**
+ * Meshes that together fill the node, for measuring it. A solid group is measured through its colour
+ * pieces, which the viewport builds anyway; uniting the whole group again would double the work.
+ */
+function boundGeometries(n: SceneNode, assets: DesignDoc['assets']): THREE.BufferGeometry[] {
+  if (n.kind === 'group' && !n.hole) {
+    const pieces = renderPieces(n, assets);
+    if (pieces.length) return pieces.map((p) => p.geometry);
+  }
   const g = renderGeometry(n, assets);
-  if (!g) return rawBox(n, assets);
-  if (!g.boundingBox) g.computeBoundingBox();
-  return g.boundingBox!;
+  return g ? [g] : [];
+}
+
+export function localBox(n: SceneNode, assets: DesignDoc['assets']): THREE.Box3 | null {
+  const gs = boundGeometries(n, assets);
+  if (!gs.length) return rawBox(n, assets);
+  const box = new THREE.Box3();
+  for (const g of gs) {
+    if (!g.boundingBox) g.computeBoundingBox();
+    box.union(g.boundingBox!);
+  }
+  return box;
 }
 
 /**
