@@ -118,6 +118,32 @@ function readResult(file) {
   };
 }
 
+/** Indexes of the objects (files) that the slicer cannot slice even on their own. */
+async function findUnsliceable(exe, files, flat, dir, timeoutMs, onProgress) {
+  const bad = [];
+  let next = 0;
+  let done = 0;
+  const worker = async () => {
+    while (next < files.length) {
+      const i = next++;
+      const sub = path.join(dir, `check${i}`);
+      fs.mkdirSync(sub, { recursive: true });
+      await run(exe, ['--slice', '0', '--arrange', '0', '--load-settings', `${flat.machine};${flat.process}`, '--load-filaments', flat.filaments[0], '--load-filament-ids', '1', '--outputdir', sub, '--export-3mf', 'o.gcode.3mf', files[i]], { timeoutMs });
+      let ok = false;
+      try {
+        ok = JSON.parse(fs.readFileSync(path.join(sub, 'result.json'), 'utf8')).error_string === 'Success.';
+      } catch {
+        /* no result: the object broke the slicer */
+      }
+      if (!ok) bad.push(i);
+      fs.rmSync(sub, { recursive: true, force: true });
+      onProgress(`Procurando partes que o fatiador não consegue imprimir… ${++done} de ${files.length}`);
+    }
+  };
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  return bad.sort((a, b) => a - b);
+}
+
 /**
  * job: {
  *   printer, process, slice: boolean,
@@ -180,25 +206,38 @@ async function slice(job, onProgress = () => {}) {
     if (result && result.return_code && result.error_string !== 'Success.') throw new Error(result.error_string);
   };
 
-  // Supports with several filaments: assemble the project first, tell each object to print its
-  // own supports, then slice that project.
-  const perObject = job.overrides?.supports === true && new Set(job.objects.map((o) => o.filament)).size > 1;
-  onProgress(job.slice ? 'Fatiando com o Bambu Studio…' : 'Montando o projeto…');
-  if (perObject) {
-    const base = path.join(dir, 'base.3mf');
-    check(await run(exe, [...common, ...ids, '--outputdir', dir, '--export-3mf', 'base.3mf', ...files], { timeoutMs }), base);
-    const patched = path.join(dir, 'patched.3mf');
-    fs.writeFileSync(patched, supportsPerObject(fs.readFileSync(base)));
-    // No --load-settings here: the project already carries them, and loading them again makes
-    // the slicer drop the prime tower.
-    if (job.slice) check(await run(exe, ['--slice', '0', '--arrange', '0', '--outputdir', dir, '--export-3mf', 'project.gcode.3mf', patched], { timeoutMs }), file);
-    else fs.copyFileSync(patched, file);
-  } else {
-    const args = [...(job.slice ? ['--slice', '0'] : []), ...common, ...ids, '--outputdir', dir, '--export-3mf', 'project.gcode.3mf', ...files];
-    check(await run(exe, args, { timeoutMs }), file);
-  }
+  try {
+    // Supports with several filaments: assemble the project first, tell each object to print its
+    // own supports, then slice that project.
+    const perObject = job.overrides?.supports === true && new Set(job.objects.map((o) => o.filament)).size > 1;
+    onProgress(job.slice ? 'Fatiando com o Bambu Studio…' : 'Montando o projeto…');
+    if (perObject) {
+      const base = path.join(dir, 'base.3mf');
+      check(await run(exe, [...common, ...ids, '--outputdir', dir, '--export-3mf', 'base.3mf', ...files], { timeoutMs }), base);
+      const patched = path.join(dir, 'patched.3mf');
+      fs.writeFileSync(patched, supportsPerObject(fs.readFileSync(base)));
+      // No --load-settings here: the project already carries them, and loading them again makes
+      // the slicer drop the prime tower.
+      if (job.slice) check(await run(exe, ['--slice', '0', '--arrange', '0', '--outputdir', dir, '--export-3mf', 'project.gcode.3mf', patched], { timeoutMs }), file);
+      else fs.copyFileSync(patched, file);
+    } else {
+      const args = [...(job.slice ? ['--slice', '0'] : []), ...common, ...ids, '--outputdir', dir, '--export-3mf', 'project.gcode.3mf', ...files];
+      check(await run(exe, args, { timeoutMs }), file);
+    }
 
-  return { dir, file, size: fs.statSync(file).size, ...readResult(file) };
+    return { dir, file, size: fs.statSync(file).size, ...readResult(file) };
+  } catch (e) {
+    // "Failed slicing" does not say which object is to blame. Slice each one alone and leave out
+    // the ones the slicer cannot print (very thin slivers, for instance), then try again.
+    if (!job.slice || job.objects.length < 2 || !/Failed slicing/i.test(String(e?.message))) throw e;
+    const bad = await findUnsliceable(exe, files, flat, dir, timeoutMs, onProgress);
+    if (!bad.length || bad.length >= job.objects.length) throw e;
+    onProgress('Fatiando sem as partes que o fatiador não consegue imprimir…');
+    const dropped = bad.map((i) => job.objects[i].name);
+    const kept = { ...job, objects: job.objects.filter((_, i) => !bad.includes(i)) };
+    const r = await slice(kept, onProgress);
+    return { ...r, dropped: [...dropped, ...(r.dropped ?? [])] };
+  }
 }
 
 function processOverrides(o = {}) {

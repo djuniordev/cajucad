@@ -51,6 +51,8 @@ export interface SliceResult {
   hasGcode: boolean;
   outsideBed: boolean;
   towerBox: number[] | null;
+  /** Objects left out because the slicer could not slice them. */
+  dropped?: string[];
 }
 
 export interface FoundPrinter {

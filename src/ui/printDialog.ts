@@ -543,6 +543,10 @@ export async function openPrintDialog() {
       overrides: { infill: s.infill, supports: s.supports, bedType: s.bedType, tower: built.tower },
     });
     busy = null;
+    if (r.dropped?.length) {
+      const n = r.dropped.length;
+      toast(`O fatiador não conseguiu imprimir ${n} ${n === 1 ? 'parte minúscula' : 'partes minúsculas'} e elas ficaram de fora: ${r.dropped.slice(0, 3).join(', ')}${n > 3 ? '…' : ''}.`, 'info', 9000);
+    }
     if (slice) {
       result = r;
       resultStale = false;

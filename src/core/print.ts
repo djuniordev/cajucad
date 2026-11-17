@@ -232,6 +232,40 @@ function mergeTouching(bodies: Body[], slotOf: number[]): Body[] {
   return out;
 }
 
+/**
+ * Objects of different colours must not share volume (a logo painted over its base, as imported from
+ * a multicolour file): the slicer would print the overlap twice and refuse the job with "G-code
+ * conflicts". Where two bodies overlap, the smaller one keeps the volume and it is cut out of the
+ * larger one. The engine can leave sheets thinner than a hair where faces coincide; those are
+ * taken from the smaller body instead.
+ */
+function separateOverlaps(bodies: Body[]) {
+  const vol = bodies.map((b) => b.solid.volume());
+  const order = bodies.map((_, i) => i).sort((a, b) => vol[a] - vol[b]);
+  const touch = (i: number, j: number) => {
+    const a = bodies[i].solid.boundingBox();
+    const b = bodies[j].solid.boundingBox();
+    return !(a.min[0] > b.max[0] || a.max[0] < b.min[0] || a.min[1] > b.max[1] || a.max[1] < b.min[1] || a.min[2] > b.max[2] || a.max[2] < b.min[2]);
+  };
+  const cut = (from: Body, what: Body) => {
+    const rest = from.solid.subtract(what.solid);
+    from.solid.delete();
+    from.solid = rest;
+  };
+  for (const si of order) for (const li of order) if (li !== si && vol[li] > vol[si] && touch(si, li)) cut(bodies[li], bodies[si]);
+  for (const si of order) {
+    for (const li of order) {
+      if (li === si || vol[li] <= vol[si] || !touch(si, li)) continue;
+      const common = bodies[li].solid.intersect(bodies[si].solid);
+      const left = !common.isEmpty() && common.volume() > 1e-5;
+      common.delete();
+      if (left) cut(bodies[si], bodies[li]);
+    }
+  }
+}
+
+const GAP = 0.03; // mm
+
 function groundBodies(bodies: Body[]) {
   const floor = (b: Body) => b.solid.boundingBox().min[2];
   const order = bodies.map((_, i) => i).sort((a, b) => floor(bodies[a]) - floor(bodies[b]));
@@ -241,6 +275,11 @@ function groundBodies(bodies: Body[]) {
     if (z0 <= 0.05) continue;
     const shadow = hang.solid.project();
     const prism = shadow.extrude(z0);
+    // The pocket left in the others is a hair larger than the column that fills it: faces that
+    // coincide exactly come out of the engine as overlapping slivers, which the slicer rejects.
+    const wide = shadow.offset(GAP, 'Miter', 2);
+    const pocket = wide.extrude(z0);
+    wide.delete();
     shadow.delete();
     const box = prism.boundingBox();
     // Everything of the other bodies that lies under this one. Only what touches the column is tested:
@@ -252,9 +291,9 @@ function groundBodies(bodies: Body[]) {
       if (ob.min[0] > box.max[0] || ob.max[0] < box.min[0] || ob.min[1] > box.max[1] || ob.max[1] < box.min[1] || ob.min[2] > box.max[2]) return;
       const part = other.solid.intersect(prism);
       if (part.isEmpty()) return part.delete();
-      // Subtract the prism, not `part`: the result is the same, but Manifold aborts on some of the
-      // second kind of cut (coincident faces left by the previous columns).
-      const rest = other.solid.subtract(prism);
+      // Cut the pocket, not `part`: Manifold aborts on some cuts made with the intersection itself
+      // (coincident faces left by the previous columns).
+      const rest = other.solid.subtract(pocket);
       other.solid.delete();
       other.solid = rest;
       const joined: Manifold = column ? column.add(part) : part;
@@ -263,6 +302,7 @@ function groundBodies(bodies: Body[]) {
       column = joined;
     });
     prism.delete();
+    pocket.delete();
     if (!column) continue;
     const grown = hang.solid.add(column);
     hang.solid.delete();
@@ -299,6 +339,7 @@ export function buildJob(doc: DesignDoc, bed: Bed, colorMap: ColorMap = {}): Bui
 
   const merged = mergeTouching(bodies, planSlots(bodies, colorMap).entries.map((e) => e.slot));
   groundBodies(merged);
+  separateOverlaps(merged);
   const { slots, entries } = planSlots<Body | OpenBody>([...merged, ...open], colorMap);
   const objects: BuiltJob['objects'] = [];
   const boxes: BuiltJob['boxes'] = [];
