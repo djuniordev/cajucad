@@ -1,5 +1,5 @@
 import type { Manifold } from 'manifold-3d';
-import { nodeMatrix, piecesOf, unionSolids, worldSolid } from './geometry';
+import { nodeMatrix, openMesh, piecesOf, unionSolids, worldSolid, type RawMesh } from './geometry';
 import { meshToStl } from './io';
 import { MATCH_DISTANCE, colorDistance, filaments, nearestByColor, type Filament } from './filaments';
 import type { DesignDoc, SceneNode } from './types';
@@ -172,6 +172,12 @@ interface Body extends Paintable {
   solid: Manifold;
 }
 
+/** An imported mesh that is not a closed solid, in world space. */
+interface OpenBody extends Paintable {
+  name: string;
+  mesh: RawMesh;
+}
+
 function bodiesOf(node: SceneNode, assets: DesignDoc['assets']): Body[] {
   if (node.kind !== 'group') {
     const solid = worldSolid(node, assets);
@@ -277,25 +283,42 @@ export function buildJob(doc: DesignDoc, bed: Bed, colorMap: ColorMap = {}): Bui
   if (doc.nodes.some((n) => n.hole && !n.hidden)) warnings.push('Furos soltos não são impressos. Agrupe o furo com o objeto para recortá-lo.');
 
   const bodies: Body[] = [];
+  const open: OpenBody[] = [];
   for (const node of nodes) {
     const list = bodiesOf(node, doc.assets);
-    if (!list.length) warnings.push(`“${node.name}” não é um sólido válido e ficou de fora.`);
+    if (!list.length) {
+      // An imported mesh with holes has no solid: the slicer gets its triangles as they are.
+      const raw = openMesh(node, doc.assets);
+      if (raw) {
+        open.push({ name: node.name, color: node.color, filament: node.filament, mesh: raw });
+        warnings.push(`“${node.name}” não é um sólido fechado: foi enviada como está e o fatiador tenta consertar a malha.`);
+      } else warnings.push(`“${node.name}” não é um sólido válido e ficou de fora.`);
+    }
     bodies.push(...list);
   }
 
   const merged = mergeTouching(bodies, planSlots(bodies, colorMap).entries.map((e) => e.slot));
   groundBodies(merged);
-  const { slots, entries } = planSlots(merged, colorMap);
+  const { slots, entries } = planSlots<Body | OpenBody>([...merged, ...open], colorMap);
   const objects: BuiltJob['objects'] = [];
   const boxes: BuiltJob['boxes'] = [];
   const used: number[] = [];
 
   for (const { item, slot } of entries) {
     // Workplane origin = centre of the bed.
-    const placed = item.solid.translate(bed.width / 2, bed.depth / 2, 0);
-    item.solid.delete();
-    const mesh = placed.getMesh();
-    placed.delete();
+    let mesh: RawMesh;
+    if ('mesh' in item) {
+      mesh = item.mesh;
+      for (let i = 0; i < mesh.vertProperties.length; i += 3) {
+        mesh.vertProperties[i] += bed.width / 2;
+        mesh.vertProperties[i + 1] += bed.depth / 2;
+      }
+    } else {
+      const placed = item.solid.translate(bed.width / 2, bed.depth / 2, 0);
+      item.solid.delete();
+      mesh = placed.getMesh();
+      placed.delete();
+    }
     const p = mesh.vertProperties;
     let x0 = Infinity, y0 = Infinity, z0 = Infinity, x1 = -Infinity, y1 = -Infinity, z1 = -Infinity;
     for (let i = 0; i < p.length; i += mesh.numProp) {

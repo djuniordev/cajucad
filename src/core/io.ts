@@ -6,7 +6,7 @@ import { SVGLoader } from 'three/examples/jsm/loaders/SVGLoader.js';
 import { GLTFExporter } from 'three/examples/jsm/exporters/GLTFExporter.js';
 import { mergeVertices, mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import type { DesignDoc, MeshAsset, Polygons, SceneNode } from './types';
-import { exportSolid, manifoldApi, nodeMatrix, renderGeometry, renderPieces, manifoldFromAsset } from './geometry';
+import { exportSolid, manifoldApi, nodeMatrix, openMeshes, rawAssetGeometry, renderGeometry, renderPieces, manifoldFromAsset, type RawMesh } from './geometry';
 import { createNode, nextColor } from './shapes';
 import { uid } from './store';
 import { idbGet, idbPut } from './idb';
@@ -247,13 +247,38 @@ export function meshToStl(mesh: { numProp: number; vertProperties: Float32Array;
 
 export type ExportFormat = 'stl' | 'obj' | 'glb';
 
+/** One mesh out of several (positions only, 3 properties per vertex). */
+function joinMeshes(parts: RawMesh[]): RawMesh {
+  const nv = parts.reduce((k, m) => k + m.vertProperties.length / m.numProp, 0);
+  const nt = parts.reduce((k, m) => k + m.triVerts.length, 0);
+  const pos = new Float32Array(nv * 3);
+  const tri = new Uint32Array(nt);
+  let vo = 0, to = 0;
+  for (const m of parts) {
+    const count = m.vertProperties.length / m.numProp;
+    for (let i = 0; i < count; i++) for (let k = 0; k < 3; k++) pos[(vo + i) * 3 + k] = m.vertProperties[i * m.numProp + k];
+    for (let i = 0; i < m.triVerts.length; i++) tri[to + i] = m.triVerts[i] + vo;
+    vo += count;
+    to += m.triVerts.length;
+  }
+  return { numProp: 3, vertProperties: pos, triVerts: tri };
+}
+
 export async function exportDesign(doc: DesignDoc, format: ExportFormat, only?: Set<string>) {
   const name = safeName(doc.title);
   if (format === 'glb') return download(await toGlb(doc, only), `${name}.glb`);
   const solid = exportSolid(doc, only);
-  if (!solid) throw new Error('Nada para exportar (furos soltos e objetos ocultos não entram).');
-  const mesh = solid.getMesh();
-  solid.delete();
+  const open = openMeshes(doc, only);
+  if (!solid && !open.length) throw new Error('Nada para exportar (furos soltos e objetos ocultos não entram).');
+  // Closed solids come out of the boolean engine; imported meshes with holes are added as they are.
+  const parts: RawMesh[] = [];
+  if (solid) {
+    const m = solid.getMesh();
+    parts.push({ numProp: m.numProp, vertProperties: m.vertProperties, triVerts: m.triVerts });
+  }
+  parts.push(...open);
+  const mesh = joinMeshes(parts);
+  solid?.delete();
   const np = mesh.numProp;
   const pos = mesh.vertProperties;
   const tri = mesh.triVerts;
@@ -270,7 +295,7 @@ async function toGlb(doc: DesignDoc, only?: Set<string>): Promise<Blob> {
   for (const n of doc.nodes) {
     if (n.hidden || n.hole || (only && !only.has(n.id))) continue;
     // A group keeps one mesh per colour; everything else is a single mesh.
-    const parts = n.kind === 'group' ? renderPieces(n, doc.assets).map((p) => ({ g: p.geometry, color: p.color })) : [{ g: renderGeometry(n, doc.assets), color: n.color }];
+    const parts = n.kind === 'group' ? renderPieces(n, doc.assets).map((p) => ({ g: p.geometry, color: p.color })) : [{ g: renderGeometry(n, doc.assets) ?? (n.kind === 'mesh' && doc.assets[String(n.params.asset)] ? rawAssetGeometry(doc.assets[String(n.params.asset)]) : null), color: n.color }];
     parts.forEach((part, i) => {
       if (!part.g) return;
       const m = new THREE.Mesh(part.g, new THREE.MeshStandardMaterial({ color: part.color, roughness: 0.5 }));

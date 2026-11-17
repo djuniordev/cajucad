@@ -515,6 +515,47 @@ export function exportSolid(doc: DesignDoc, onlyIds?: Set<string>): Manifold | n
   return u;
 }
 
+/** Triangles in world space (the layout of a Manifold mesh with 3 properties per vertex). */
+export interface RawMesh {
+  numProp: number;
+  vertProperties: Float32Array;
+  triVerts: Uint32Array;
+}
+
+/**
+ * World-space triangles of an imported mesh that is not a closed solid (so it has no Manifold).
+ * Returns null for anything else.
+ */
+export function openMesh(n: SceneNode, assets: DesignDoc['assets']): RawMesh | null {
+  if (n.kind !== 'mesh') return null;
+  const asset = assets[String(n.params.asset)];
+  if (!asset) return null;
+  const local = solidOf(n, assets);
+  if (local) return null;
+  const m = nodeMatrix(n);
+  const src = asset.positions;
+  const out = new Float32Array(src.length);
+  const v = new THREE.Vector3();
+  for (let i = 0; i < src.length; i += 3) {
+    v.set(src[i], src[i + 1], src[i + 2]).applyMatrix4(m);
+    out[i] = v.x;
+    out[i + 1] = v.y;
+    out[i + 2] = v.z;
+  }
+  return { numProp: 3, vertProperties: out, triVerts: new Uint32Array(asset.indices) };
+}
+
+/** Visible open meshes of the scene (for export). */
+export function openMeshes(doc: DesignDoc, onlyIds?: Set<string>): RawMesh[] {
+  const out: RawMesh[] = [];
+  for (const n of doc.nodes) {
+    if (n.hidden || n.hole || (onlyIds && !onlyIds.has(n.id))) continue;
+    const m = openMesh(n, doc.assets);
+    if (m) out.push(m);
+  }
+  return out;
+}
+
 export const manifoldApi = () => wasm;
 
 export function decompose(m: THREE.Matrix4): Pick<SceneNode, 'position' | 'rotation' | 'scale'> {
