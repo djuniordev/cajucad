@@ -324,7 +324,8 @@ export class Viewport {
     mesh.userData.nodeId = nodeId;
     let eg = this.edgeCache.get(geom);
     if (!eg) {
-      eg = new THREE.EdgesGeometry(geom, 32);
+      // An object with no geometry (empty text, group of holes only, lost mesh data) has nothing to outline.
+      eg = (geom.getAttribute('position') ? new THREE.EdgesGeometry(geom, 32) : new THREE.BufferGeometry()) as THREE.EdgesGeometry;
       this.edgeCache.set(geom, eg);
     }
     const edges = new THREE.LineSegments(eg, new THREE.LineBasicMaterial({ transparent: true }));
